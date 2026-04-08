@@ -258,32 +258,40 @@ def _openai_translate_segments(segments, target_language='en', log=None):
     }
     lang_name = lang_names.get(target_language, target_language)
     
-    # System prompt: always use the professional translator rules
-    system_prompt = (
+    # User message: custom prompt (if set from UI) + numbered text to translate
+    custom = globals().get('TRANSLATION_CUSTOM_PROMPT', '').strip()
+
+    # Build system prompt: base translator rules + TTS-safe language + custom prompt
+    base_rules = (
         f"You are a professional translator.\n\n"
         f"Rules:\n"
         f"- Detect the source language automatically.\n"
         f"- Translate the text into {lang_name}.\n"
         f"- Use natural, fluent language (not word-for-word translation).\n"
+        f"- Use friendly, warm, and conversational words. Avoid any harsh, vulgar, violent, "
+        f"explicit, or offensive language. Rephrase anything that could be considered inappropriate "
+        f"into safe, family-friendly alternatives. This is critical because the translated text "
+        f"will be used for AI voice generation (text-to-speech) which has strict content policies.\n"
         f"- Keep the same number of lines as the original text.\n"
         f"- Preserve numbering like \"1. 2. 3.\"\n"
         f"- Return only the translated text."
     )
-    
-    # User message: custom prompt (if set from UI) + numbered text to translate
-    custom = globals().get('TRANSLATION_CUSTOM_PROMPT', '').strip()
+
     if custom:
-        # Replace {language} placeholder with actual target language name
-        user_content = custom.replace('{language}', lang_name) + "\n\n" + numbered_text
+        # Incorporate custom prompt into system instructions so the model follows it
+        custom_resolved = custom.replace('{language}', lang_name)
+        system_prompt = base_rules + "\n\nAdditional instructions from the user:\n" + custom_resolved
     else:
-        user_content = numbered_text
+        system_prompt = base_rules
+
+    user_content = numbered_text
     
     if log:
         log(f"[OpenAI TRANSLATE] Sending {len(segments)} segments to {globals().get('OPENAI_MODEL', 'gpt-4o-mini')} for {lang_name} translation...")
         if custom:
-            log(f"[OpenAI TRANSLATE] Using CUSTOM user prompt: {custom[:120]}{'...' if len(custom) > 120 else ''}")
+            log(f"[OpenAI TRANSLATE] Using CUSTOM system prompt: {custom[:120]}{'...' if len(custom) > 120 else ''}")
         else:
-            log(f"[OpenAI TRANSLATE] Using default translator prompt")
+            log(f"[OpenAI TRANSLATE] Using default translator prompt (TTS-friendly)")
     
     import time as _time
     import re
