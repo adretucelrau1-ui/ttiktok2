@@ -258,44 +258,25 @@ def _openai_translate_segments(segments, target_language='en', log=None):
     }
     lang_name = lang_names.get(target_language, target_language)
     
-    # Mandatory rules that are ALWAYS included (TTS-safe language + formatting)
-    mandatory_rules = (
-        f"\n\nMandatory rules (always follow these):\n"
-        f"- Translate the text into {lang_name}.\n"
-        f"- Use friendly, warm, and conversational words. Avoid any harsh, vulgar, violent, "
-        f"explicit, or offensive language. Rephrase anything that could be considered inappropriate "
-        f"into safe, family-friendly alternatives. This is critical because the translated text "
-        f"will be used for AI voice generation (text-to-speech) which has strict content policies.\n"
+    # Build system prompt — simple and direct so the model follows it
+    # TTS-friendly rule is baked directly into the core instructions
+    system_prompt = (
+        f"Translate in {lang_name} and make the text friendly.\n\n"
+        f"Rules:\n"
+        f"- Detect the source language automatically.\n"
+        f"- Make the text friendly, warm, and conversational. Avoid any harsh, vulgar, violent, "
+        f"explicit, or offensive language. Rephrase anything inappropriate "
+        f"into safe, family-friendly alternatives (this text will be used for TTS voice generation).\n"
         f"- Keep the same number of lines as the original text.\n"
         f"- Preserve numbering like \"1. 2. 3.\"\n"
         f"- Return only the translated text."
     )
 
-    # Check if the user set a custom prompt from the UI
-    custom = globals().get('TRANSLATION_CUSTOM_PROMPT', '').strip()
-
-    if custom:
-        # Custom prompt REPLACES the default system prompt so the model actually follows it.
-        # Mandatory TTS-safe + formatting rules are always appended.
-        custom_resolved = custom.replace('{language}', lang_name)
-        system_prompt = custom_resolved + mandatory_rules
-    else:
-        # Default: professional translator + TTS-safe language
-        system_prompt = (
-            f"You are a professional translator.\n\n"
-            f"Rules:\n"
-            f"- Detect the source language automatically.\n"
-            f"- Use natural, fluent language (not word-for-word translation)."
-        ) + mandatory_rules
-
     user_content = numbered_text
     
     if log:
         log(f"[OpenAI TRANSLATE] Sending {len(segments)} segments to {globals().get('OPENAI_MODEL', 'gpt-4o-mini')} for {lang_name} translation...")
-        if custom:
-            log(f"[OpenAI TRANSLATE] Using CUSTOM system prompt: {custom[:120]}{'...' if len(custom) > 120 else ''}")
-        else:
-            log(f"[OpenAI TRANSLATE] Using default translator prompt (TTS-friendly)")
+        log(f"[OpenAI TRANSLATE] Using friendly TTS-safe prompt for {lang_name}")
     
     import time as _time
     import re
