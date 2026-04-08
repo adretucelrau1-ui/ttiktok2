@@ -258,11 +258,9 @@ def _openai_translate_segments(segments, target_language='en', log=None):
     }
     lang_name = lang_names.get(target_language, target_language)
     
-    # Build system prompt — simple and direct so the model follows it
-    # TTS-friendly rule is baked directly into the core instructions
-    system_prompt = (
-        f"Translate in {lang_name} and make the text friendly.\n\n"
-        f"Rules:\n"
+    # Mandatory rules always appended (TTS-safe + formatting)
+    mandatory_rules = (
+        f"\n\nRules:\n"
         f"- Detect the source language automatically.\n"
         f"- Make the text friendly, warm, and conversational. Avoid any harsh, vulgar, violent, "
         f"explicit, or offensive language. Rephrase anything inappropriate "
@@ -272,11 +270,23 @@ def _openai_translate_segments(segments, target_language='en', log=None):
         f"- Return only the translated text."
     )
 
+    # Use custom prompt from UI when set, otherwise use default
+    custom = globals().get('TRANSLATION_CUSTOM_PROMPT', '').strip()
+    if custom:
+        # Replace {language} placeholder and use as main instruction
+        system_prompt = custom.replace('{language}', lang_name) + mandatory_rules
+    else:
+        # Default: simple, direct instruction
+        system_prompt = f"Translate in {lang_name} and make the text friendly." + mandatory_rules
+
     user_content = numbered_text
     
     if log:
         log(f"[OpenAI TRANSLATE] Sending {len(segments)} segments to {globals().get('OPENAI_MODEL', 'gpt-4o-mini')} for {lang_name} translation...")
-        log(f"[OpenAI TRANSLATE] Using friendly TTS-safe prompt for {lang_name}")
+        if custom:
+            log(f"[OpenAI TRANSLATE] Custom prompt: {custom[:80]}{'...' if len(custom) > 80 else ''}")
+        else:
+            log(f"[OpenAI TRANSLATE] Default prompt: Translate in {lang_name} and make the text friendly.")
     
     import time as _time
     import re
@@ -1671,7 +1681,7 @@ TTS_ENGINE = 'gtts'  # Options: 'gtts' (free, basic), 'elevenlabs', 'openai', 'a
 ELEVENLABS_API_KEY = None
 OPENAI_API_KEY = None
 OPENAI_MODEL = "gpt-4o-mini"  # OpenAI model for translation; user can change via UI dropdown
-TRANSLATION_CUSTOM_PROMPT = ""  # User-defined prompt for OpenAI translation; {language} is auto-replaced
+TRANSLATION_CUSTOM_PROMPT = "translate in {language} and make the text friendly"  # Shown in UI Prompt field; {language} is auto-replaced
 STOP_REQUESTED = False
 AZURE_SPEECH_KEY = None
 AZURE_SPEECH_REGION = None
