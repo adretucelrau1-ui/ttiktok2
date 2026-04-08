@@ -258,16 +258,10 @@ def _openai_translate_segments(segments, target_language='en', log=None):
     }
     lang_name = lang_names.get(target_language, target_language)
     
-    # User message: custom prompt (if set from UI) + numbered text to translate
-    custom = globals().get('TRANSLATION_CUSTOM_PROMPT', '').strip()
-
-    # Build system prompt: base translator rules + TTS-safe language + custom prompt
-    base_rules = (
-        f"You are a professional translator.\n\n"
-        f"Rules:\n"
-        f"- Detect the source language automatically.\n"
+    # Mandatory rules that are ALWAYS included (TTS-safe language + formatting)
+    mandatory_rules = (
+        f"\n\nMandatory rules (always follow these):\n"
         f"- Translate the text into {lang_name}.\n"
-        f"- Use natural, fluent language (not word-for-word translation).\n"
         f"- Use friendly, warm, and conversational words. Avoid any harsh, vulgar, violent, "
         f"explicit, or offensive language. Rephrase anything that could be considered inappropriate "
         f"into safe, family-friendly alternatives. This is critical because the translated text "
@@ -277,12 +271,22 @@ def _openai_translate_segments(segments, target_language='en', log=None):
         f"- Return only the translated text."
     )
 
+    # Check if the user set a custom prompt from the UI
+    custom = globals().get('TRANSLATION_CUSTOM_PROMPT', '').strip()
+
     if custom:
-        # Incorporate custom prompt into system instructions so the model follows it
+        # Custom prompt REPLACES the default system prompt so the model actually follows it.
+        # Mandatory TTS-safe + formatting rules are always appended.
         custom_resolved = custom.replace('{language}', lang_name)
-        system_prompt = base_rules + "\n\nAdditional instructions from the user:\n" + custom_resolved
+        system_prompt = custom_resolved + mandatory_rules
     else:
-        system_prompt = base_rules
+        # Default: professional translator + TTS-safe language
+        system_prompt = (
+            f"You are a professional translator.\n\n"
+            f"Rules:\n"
+            f"- Detect the source language automatically.\n"
+            f"- Use natural, fluent language (not word-for-word translation)."
+        ) + mandatory_rules
 
     user_content = numbered_text
     
