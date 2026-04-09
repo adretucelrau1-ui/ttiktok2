@@ -1475,6 +1475,33 @@ def generate_tts_audio(text, language='en', output_path=None, log=None):
             log("="*60)
         return result
     
+    # --- Fallback voice retry ---
+    fallback_id = globals().get('TTS_FALLBACK_VOICE_ID', 'auto')
+    primary_id = globals().get('TTS_VOICE_ID', 'auto')
+    if fallback_id and fallback_id != 'auto' and fallback_id != primary_id:
+        if log:
+            log("")
+            log("="*60)
+            log("[TTS] ⚠️  PRIMARY VOICE FAILED — TRYING FALLBACK VOICE")
+            log(f"[TTS] Fallback voice ID: {fallback_id}")
+            log("="*60)
+        # Temporarily swap to fallback voice
+        old_voice = globals().get('TTS_VOICE_ID')
+        globals()['TTS_VOICE_ID'] = fallback_id
+        try:
+            result = generate_tts_with_genaipro(text, language, output_path, api_key, log)
+        finally:
+            globals()['TTS_VOICE_ID'] = old_voice  # Restore primary voice
+        if result:
+            if log:
+                log("="*60)
+                log("[TTS] ✅ FALLBACK VOICE GENERATION COMPLETE!")
+                log(f"[TTS] Audio file ready: {result}")
+                log("="*60)
+            return result
+        if log:
+            log("[TTS] ❌ Fallback voice also failed.")
+    
     if log:
         log("[TTS] ❌ GenAI Pro TTS failed. No voice generated.")
     return None
@@ -1673,6 +1700,7 @@ TARGET_LANGUAGE = 'none'  # 'none', 'en', 'es', 'fr', 'ro', etc.
 USE_AI_VOICE_REPLACEMENT = False
 TTS_LANGUAGE = 'en'
 TTS_VOICE_ID = 'auto'  # 'auto' or specific voice ID
+TTS_FALLBACK_VOICE_ID = 'auto'  # Backup voice ID used when primary voice fails (policy violation, crash, etc.)
 # Mapping from translation language codes to TTS language codes (they differ for some languages)
 TRANS_TO_TTS_LANG = {'zh-cn': 'zh', 'zh-tw': 'zh'}
 # Premium TTS API keys (for better quality voices)
@@ -5729,7 +5757,30 @@ def _submit_voice_for_job(job, job_index, total_jobs, q):
                     'silence_threshold_ms': silence_threshold_ms,
                     'full_text': full_text,
                 }
-            log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ❌ GenAI Pro submission failed")
+            # --- Fallback voice retry for submission ---
+            fallback_id = globals().get('TTS_FALLBACK_VOICE_ID', 'auto')
+            primary_id = globals().get('TTS_VOICE_ID', 'auto')
+            if fallback_id and fallback_id != 'auto' and fallback_id != primary_id:
+                log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ⚠️ PRIMARY VOICE FAILED — trying fallback voice...")
+                old_voice = globals().get('TTS_VOICE_ID')
+                globals()['TTS_VOICE_ID'] = fallback_id
+                try:
+                    task_id, headers = _submit_genaipro_task(full_text, tts_language, api_key, log)
+                finally:
+                    globals()['TTS_VOICE_ID'] = old_voice
+                if task_id:
+                    log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ✅ Fallback voice submitted! Task: {task_id[:12]}...")
+                    return {
+                        'needs_polling': True,
+                        'task_id': task_id,
+                        'headers': headers,
+                        'api_key': api_key,
+                        'caption_segments': caption_segments,
+                        'tts_language': tts_language,
+                        'silence_threshold_ms': silence_threshold_ms,
+                        'full_text': full_text,
+                    }
+            log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ❌ GenAI Pro submission failed (primary + fallback)")
 
         log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ❌ Voice generation failed — please check your GenAI Pro API key in tts_config.json")
         return None
@@ -5774,8 +5825,28 @@ def _complete_voice_for_job(submission, job_index, total_jobs, q):
                 log=log
             )
             if not tts_audio_path:
-                log(f"[VOICE COMPLETE {job_index}/{total_jobs}] ❌ GenAI Pro failed")
-                return None
+                # --- Fallback voice retry for async path ---
+                fallback_id = globals().get('TTS_FALLBACK_VOICE_ID', 'auto')
+                primary_id = globals().get('TTS_VOICE_ID', 'auto')
+                if fallback_id and fallback_id != 'auto' and fallback_id != primary_id:
+                    log(f"[VOICE COMPLETE {job_index}/{total_jobs}] ⚠️ PRIMARY VOICE FAILED — trying fallback voice ({fallback_id[:12]}...)")
+                    old_voice = globals().get('TTS_VOICE_ID')
+                    globals()['TTS_VOICE_ID'] = fallback_id
+                    try:
+                        fb_task_id, fb_headers = _submit_genaipro_task(
+                            submission.get('full_text', ''),
+                            submission.get('tts_language', 'en'),
+                            submission.get('api_key'),
+                            log
+                        )
+                        if fb_task_id:
+                            log(f"[VOICE COMPLETE {job_index}/{total_jobs}] ⏳ Waiting for fallback voice...")
+                            tts_audio_path = _poll_and_download_genaipro(fb_task_id, fb_headers, output_path=None, log=log)
+                    finally:
+                        globals()['TTS_VOICE_ID'] = old_voice
+                if not tts_audio_path:
+                    log(f"[VOICE COMPLETE {job_index}/{total_jobs}] ❌ GenAI Pro failed (primary + fallback)")
+                    return None
         else:
             tts_audio_path = submission.get('tts_audio_path')
 
@@ -6665,6 +6736,18 @@ class App:
         # Load custom voices on startup
         self.update_voice_dropdown(TTS_LANGUAGE)
         
+        row += 1
+
+        # Fallback Voice dropdown - used when primary voice fails (policy violation, crash, etc.)
+        _lbl_fallback_voice = ttk.Label(left_frame, text="Fallback Voice:")
+        _lbl_fallback_voice.grid(row=row, column=0, sticky="e")
+        self.tts_fallback_voice_var = tk.StringVar(value='Auto (Default)')
+        self.tts_fallback_voice_combo = ttk.Combobox(left_frame, textvariable=self.tts_fallback_voice_var,
+                                                     values=current_voices, state='readonly', width=15)
+        self.tts_fallback_voice_combo.grid(row=row, column=1, sticky="w", padx=(6,0))
+        self.tts_fallback_voice_combo.bind('<<ComboboxSelected>>', self.on_fallback_voice_selected)
+        ttk.Label(left_frame, text="(backup if primary fails)").grid(row=row, column=2, sticky='w', padx=(4,0))
+        self._register_lockable("tts_fallback_voice", _lbl_fallback_voice, self.tts_fallback_voice_combo, is_combo_readonly=True)
         row += 1
 
         # API Key input for premium TTS services
@@ -8141,6 +8224,16 @@ class App:
                 # Re-sync the global in case it was stale
                 globals()['TTS_VOICE_ID'] = self.voice_id_map.get(current, 'auto')
             
+            # Also update the fallback voice dropdown with the same voice list
+            if hasattr(self, 'tts_fallback_voice_combo'):
+                self.tts_fallback_voice_combo['values'] = voices
+                fb_current = self.tts_fallback_voice_var.get()
+                if fb_current not in voices:
+                    self.tts_fallback_voice_var.set('Auto (Default)')
+                    globals()['TTS_FALLBACK_VOICE_ID'] = 'auto'
+                else:
+                    globals()['TTS_FALLBACK_VOICE_ID'] = self.voice_id_map.get(fb_current, 'auto')
+            
             print(f"[Voice Dropdown] Updated for {language}: {len(voices)} voices available")
         except Exception as e:
             print(f"Update voice dropdown error: {e}")
@@ -8154,6 +8247,16 @@ class App:
             print(f"[Voice Selection] Selected: {voice_name} (ID: {voice_id})")
         except Exception as e:
             print(f"Voice selection error: {e}")
+    
+    def on_fallback_voice_selected(self, event=None):
+        """Callback when a fallback voice is selected"""
+        try:
+            voice_name = self.tts_fallback_voice_var.get()
+            voice_id = self.voice_id_map.get(voice_name, 'auto')
+            globals()['TTS_FALLBACK_VOICE_ID'] = voice_id
+            print(f"[Fallback Voice] Selected: {voice_name} (ID: {voice_id})")
+        except Exception as e:
+            print(f"Fallback voice selection error: {e}")
     
     def on_save_api_key(self):
         """Callback when Save API Key button is clicked"""
@@ -10361,6 +10464,7 @@ class App:
                 "use_ai_voice": self.use_ai_voice_var.get(),
                 "tts_language": self.tts_language_var.get(),
                 "tts_voice": self.tts_voice_var.get(),
+                "tts_fallback_voice": self.tts_fallback_voice_var.get() if hasattr(self, 'tts_fallback_voice_var') else "Auto (Default)",
                 "silence_threshold": self.silence_threshold_var.get(),
                 "tts_speed": self.tts_speed_var.get() if hasattr(self, 'tts_speed_var') else 1.0,
                 
@@ -10479,6 +10583,10 @@ class App:
             saved_voice = preset_data.get("tts_voice", 'Auto (Default)')
             self.tts_voice_var.set(saved_voice)
             globals()['TTS_VOICE_ID'] = self.voice_id_map.get(saved_voice, 'auto')
+            if hasattr(self, 'tts_fallback_voice_var'):
+                saved_fb = preset_data.get("tts_fallback_voice", 'Auto (Default)')
+                self.tts_fallback_voice_var.set(saved_fb)
+                globals()['TTS_FALLBACK_VOICE_ID'] = self.voice_id_map.get(saved_fb, 'auto')
             self.silence_threshold_var.set(preset_data.get("silence_threshold", 300))
             if hasattr(self, 'tts_speed_var'):
                 self.tts_speed_var.set(preset_data.get("tts_speed", TTS_SPEED))
@@ -10613,6 +10721,10 @@ class App:
             saved_voice = preset_data.get("tts_voice", 'Auto (Default)')
             self.tts_voice_var.set(saved_voice)
             globals()['TTS_VOICE_ID'] = self.voice_id_map.get(saved_voice, 'auto')
+            if hasattr(self, 'tts_fallback_voice_var'):
+                saved_fb = preset_data.get("tts_fallback_voice", 'Auto (Default)')
+                self.tts_fallback_voice_var.set(saved_fb)
+                globals()['TTS_FALLBACK_VOICE_ID'] = self.voice_id_map.get(saved_fb, 'auto')
             self.silence_threshold_var.set(preset_data.get("silence_threshold", 300))
             if hasattr(self, 'tts_speed_var'):
                 self.tts_speed_var.set(preset_data.get("tts_speed", TTS_SPEED))
