@@ -767,32 +767,42 @@ def _genaipro_session(requests_module):
 def _find_task_in_genaipro_response(data, task_id):
     """
     Locate a specific task in any response shape returned by genaipro.vn.
-    Handles three formats:
-      - Per-task dict:   {"id": "...", "status": "...", "result": "..."}
-      - Wrapped list:    {"tasks": [...], "total": N, ...}
-      - Bare list:       [{"id": "...", ...}, ...]
+    Handles multiple formats:
+      - Per-task dict:          {"id": "...", "status": "...", "result": "..."}
+      - Wrapped single dict:    {"data": {"id": "...", "status": "..."}, "success": true}
+      - Wrapped list:           {"tasks": [...], "total": N, ...}
+      - Bare list:              [{"id": "...", ...}, ...]
     Returns the task dict or None.
     """
     if isinstance(data, dict):
-        # Case 1: looks like a task object itself
+        # Case 1: looks like a task object itself (has known id field at top level)
         tid = data.get('id') or data.get('task_id')
-        if tid is not None and (tid == task_id or task_id is None):
+        if tid is not None and (str(tid) == str(task_id) or task_id is None):
             return data
-        # Case 2: wrapped list — look in common envelope keys
-        for key in ('tasks', 'data', 'items', 'results'):
+        # Case 2: unwrap envelope keys — value may be a list OR a single task dict
+        for key in ('tasks', 'data', 'items', 'results', 'task'):
             inner = data.get(key)
             if isinstance(inner, list):
                 for task in inner:
                     tid = task.get('id') or task.get('task_id')
-                    if tid == task_id:
+                    if tid is not None and str(tid) == str(task_id):
                         return task
-        # Case 3: the per-task endpoint has 'status' but no 'id' / mismatched id
+            elif isinstance(inner, dict):
+                # Single task wrapped in an envelope key
+                tid = inner.get('id') or inner.get('task_id')
+                if tid is not None and (str(tid) == str(task_id) or task_id is None):
+                    return inner
+                # Even if id doesn't match, return if it has a status field (per-task endpoint)
+                if 'status' in inner and task_id is None:
+                    return inner
+        # Case 3: the response has 'status' but no matching id field
+        # (per-task endpoint may omit the id in the body)
         if 'status' in data:
             return data
     elif isinstance(data, list):
         for task in data:
             tid = task.get('id') or task.get('task_id')
-            if tid == task_id:
+            if tid is not None and str(tid) == str(task_id):
                 return task
     return None
 
@@ -886,7 +896,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             timeout=30
         )
         
-        if response.status_code != 200:
+        if response.status_code not in (200, 201, 202):
             if log:
                 err_body = response.text[:300]
                 log(f"[GenAI Pro ERROR] Task submission failed: {response.status_code} - {err_body}")
@@ -896,13 +906,53 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     log("[GenAI Pro ERROR]     and paste it in the 'TTS API Key' field, then click 'Save API Key'.")
             return None
         
-        task_data = response.json()
-        # GenAI Pro might return 'task_id' or 'id' field
+        try:
+            task_data = response.json()
+        except Exception:
+            if log:
+                log(f"[GenAI Pro ERROR] Non-JSON submission response (status {response.status_code}), first 200 bytes: {response.content[:200]}")
+            return None
+
+        if log:
+            log(f"[GenAI Pro] Submission response ({response.status_code}): {str(task_data)[:400]}")
+
+        # Handle synchronous response: API may return audio URL directly (no polling needed)
+        direct_audio_url = (task_data.get('audio_url') or task_data.get('output_url') or
+                            task_data.get('result_url') or task_data.get('file_url') or
+                            task_data.get('url'))
+        # Also unwrap one level of "data" envelope for direct URL
+        if not direct_audio_url and isinstance(task_data.get('data'), dict):
+            inner = task_data['data']
+            direct_audio_url = (inner.get('audio_url') or inner.get('output_url') or
+                                inner.get('result_url') or inner.get('file_url') or
+                                inner.get('url'))
+        if direct_audio_url and direct_audio_url.startswith('http'):
+            if log:
+                log(f"[GenAI Pro] 🎯 Synchronous response — audio URL returned immediately, downloading...")
+            try:
+                audio_response = requests.get(direct_audio_url, timeout=120)
+                if audio_response.status_code == 200:
+                    with open(output_path, 'wb') as f:
+                        f.write(audio_response.content)
+                    if log:
+                        log(f"[GenAI Pro] ✅ TTS generated successfully (sync): {output_path}")
+                    return output_path
+                elif log:
+                    log(f"[GenAI Pro ERROR] Direct audio download failed: HTTP {audio_response.status_code}")
+            except Exception as dl_err:
+                if log:
+                    log(f"[GenAI Pro ERROR] Direct audio download error: {dl_err}")
+            return None
+
+        # GenAI Pro might return 'task_id' or 'id' field (or nested under 'data')
         task_id = task_data.get('task_id') or task_data.get('id')
+        if not task_id and isinstance(task_data.get('data'), dict):
+            inner = task_data['data']
+            task_id = inner.get('task_id') or inner.get('id')
         
         if not task_id:
             if log:
-                log(f"[GenAI Pro ERROR] No task_id in response: {task_data}")
+                log(f"[GenAI Pro ERROR] No task_id in response: {str(task_data)[:400]}")
             return None
         
         if log:
@@ -952,7 +1002,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                 i += 1
                 continue
             
-            if status_response.status_code != 200:
+            if status_response.status_code not in (200, 201, 202):
                 consecutive_non200 += 1
                 if log:
                     body_preview = status_response.text[:200] if status_response.text else '(empty)'
@@ -975,9 +1025,9 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             our_task = _find_task_in_genaipro_response(raw_data, task_id)
             if our_task is None:
                 if i == 0 and log:
-                    log(f"[GenAI Pro] Task {task_id[:12] if len(task_id) > 12 else task_id} not found yet — queued...")
+                    log(f"[GenAI Pro] Task {task_id[:12] if len(task_id) > 12 else task_id} not found yet — queued... (raw: {str(raw_data)[:300]})")
                 elif i % 30 == 0 and log and i > 0:
-                    log(f"[GenAI Pro] Still waiting for task {task_id[:12] if len(task_id) > 12 else task_id}...")
+                    log(f"[GenAI Pro] Still waiting for task {task_id[:12] if len(task_id) > 12 else task_id}... (raw: {str(raw_data)[:200]})")
                 i += 1
                 continue
 
@@ -1158,7 +1208,7 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
             timeout=30
         )
 
-        if response.status_code != 200:
+        if response.status_code not in (200, 201, 202):
             if log:
                 err_body = response.text[:300]
                 log(f"[GenAI Pro Submit ERROR] {response.status_code} - {err_body}")
@@ -1168,12 +1218,24 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
                     log("[GenAI Pro Submit ERROR]     and paste it in the 'TTS API Key' field, then click 'Save API Key'.")
             return None, None
 
-        task_data = response.json()
+        try:
+            task_data = response.json()
+        except Exception:
+            if log:
+                log(f"[GenAI Pro Submit ERROR] Non-JSON response (status {response.status_code}): {response.content[:200]}")
+            return None, None
+
+        if log:
+            log(f"[GenAI Pro Submit] Response ({response.status_code}): {str(task_data)[:400]}")
+
         task_id = task_data.get('task_id') or task_data.get('id')
+        if not task_id and isinstance(task_data.get('data'), dict):
+            inner = task_data['data']
+            task_id = inner.get('task_id') or inner.get('id')
 
         if not task_id:
             if log:
-                log(f"[GenAI Pro Submit ERROR] No task_id in response: {task_data}")
+                log(f"[GenAI Pro Submit ERROR] No task_id in response: {str(task_data)[:400]}")
             return None, None
 
         if log:
@@ -1252,7 +1314,7 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                 i += 1
                 continue
 
-            if status_response.status_code != 200:
+            if status_response.status_code not in (200, 201, 202):
                 consecutive_non200 += 1
                 if log:
                     body_preview = status_response.text[:200] if status_response.text else '(empty)'
@@ -1275,9 +1337,9 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
             our_task = _find_task_in_genaipro_response(raw_data, task_id)
             if our_task is None:
                 if i == 0 and log:
-                    log(f"[GenAI Pro Poll] Task not found yet — may still be queued...")
+                    log(f"[GenAI Pro Poll] Task not found yet — may still be queued... (raw: {str(raw_data)[:300]})")
                 elif i % 30 == 0 and log and i > 0:
-                    log(f"[GenAI Pro Poll] Still waiting for task {tag}...")
+                    log(f"[GenAI Pro Poll] Still waiting for task {tag}... (raw: {str(raw_data)[:200]})")
                 i += 1
                 continue
 
