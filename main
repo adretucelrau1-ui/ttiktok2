@@ -777,7 +777,7 @@ def _find_task_in_genaipro_response(data, task_id):
     if isinstance(data, dict):
         # Case 1: looks like a task object itself (has known id field at top level)
         tid = data.get('id') or data.get('task_id')
-        if tid is not None and (str(tid) == str(task_id) or task_id is None):
+        if tid is not None and (task_id is None or str(tid) == str(task_id)):
             return data
         # Case 2: unwrap envelope keys — value may be a list OR a single task dict
         for key in ('tasks', 'data', 'items', 'results', 'task'):
@@ -790,7 +790,7 @@ def _find_task_in_genaipro_response(data, task_id):
             elif isinstance(inner, dict):
                 # Single task wrapped in an envelope key
                 tid = inner.get('id') or inner.get('task_id')
-                if tid is not None and (str(tid) == str(task_id) or task_id is None):
+                if tid is not None and (task_id is None or str(tid) == str(task_id)):
                     return inner
                 # Even if id doesn't match, return if it has a status field (per-task endpoint)
                 if 'status' in inner and task_id is None:
