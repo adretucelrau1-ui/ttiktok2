@@ -805,7 +805,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         
         # Step 1: Submit TTS task
         if log:
-            log(f"[GenAI Pro] Submitting TTS task ({len(text)} chars)...")
+            token_preview = api_key[:8] + "..." if len(api_key) > 8 else "(short)"
+            log(f"[GenAI Pro] Submitting TTS task ({len(text)} chars)... [token: {token_preview}]")
         
         headers = {
             'Authorization': f'Bearer {api_key}',
@@ -1084,7 +1085,8 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
         }
 
         if log:
-            log(f"[GenAI Pro Submit] Submitting TTS task ({len(text)} chars)...")
+            token_preview = api_key[:8] + "..." if len(api_key) > 8 else "(short)"
+            log(f"[GenAI Pro Submit] Submitting TTS task ({len(text)} chars)... [token: {token_preview}]")
 
         response = requests.post(
             'https://genaipro.vn/api/v1/labs/task',
@@ -1442,6 +1444,9 @@ def _get_genaipro_api_key():
             with open(config_path, 'r') as f:
                 config = json.load(f)
                 key = config.get("api_key", "").strip()
+                # Strip any "Bearer " prefix the user may have accidentally included
+                if key.lower().startswith("bearer "):
+                    key = key[7:].strip()
                 return key if key else None
     except Exception:
         pass
@@ -8278,6 +8283,10 @@ class App:
                 messagebox.showwarning("No API Key", "Please enter an API key.")
                 return
             
+            # Strip any "Bearer " prefix the user may have accidentally copied from browser DevTools
+            if api_key.lower().startswith("bearer "):
+                api_key = api_key[7:].strip()
+            
             # Save to config file — read existing config first to preserve custom_voices and other data
             config_path = os.path.join(os.path.dirname(__file__), "tts_config.json")
             config = {}
@@ -8292,7 +8301,8 @@ class App:
             try:
                 with open(config_path, 'w') as f:
                     json.dump(config, f, indent=2)
-                messagebox.showinfo("API Key Saved", f"Your API key has been saved successfully!\n\nConfig: {config_path}")
+                preview = api_key[:8] + "..." if len(api_key) > 8 else api_key
+                messagebox.showinfo("API Key Saved", f"Your API key has been saved successfully!\n\nToken starts with: {preview}\nConfig: {config_path}")
             except Exception as e:
                 messagebox.showerror("Save Error", f"Failed to save API key: {e}")
         except Exception as e:
