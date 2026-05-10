@@ -745,7 +745,7 @@ def _openai_tts_generate(text, language='en', output_path=None, log=None):
 
 
 # GenAI Pro API constraints
-GENAIPRO_API_BASE = 'https://genaipro.vn'  # API base URL — path /v1/labs/task (no /api/ prefix)
+GENAIPRO_API_BASE = 'https://genaipro.vn/api'  # API base URL — endpoints live under /api/v1/labs/task
 GENAIPRO_MIN_SPEED = 0.7     # Minimum TTS speed accepted by the API
 GENAIPRO_MAX_SPEED = 1.2     # Maximum TTS speed accepted by the API
 GENAIPRO_MAX_WAIT_SECONDS = 600  # Max time to wait for a TTS task (10 minutes)
