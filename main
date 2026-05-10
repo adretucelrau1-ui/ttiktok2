@@ -981,11 +981,44 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                             log(f"[GenAI Pro] ✅ TTS generated successfully (cached): {output_path}")
                         return output_path
                     elif log:
-                        log(f"[GenAI Pro ERROR] Cached audio download failed: HTTP {audio_response.status_code}")
+                        log(f"[GenAI Pro ERROR] Cached audio download failed: HTTP {audio_response.status_code} — result URL likely expired, re-submitting with nonce")
                 except Exception as dl_err:
                     if log:
-                        log(f"[GenAI Pro ERROR] Cached audio download error: {dl_err}")
-                # Fall through to polling in case the CDN URL is temporarily unavailable
+                        log(f"[GenAI Pro ERROR] Cached audio download error: {dl_err} — re-submitting with nonce")
+                # The cached result URL is expired/broken — force a fresh task via nonce and let polling handle it
+                try:
+                    nonce_payload = dict(task_payload)
+                    nonce_payload['input'] = task_payload['input'].rstrip() + '\u200B'
+                    nonce_resp = session.post(
+                        'https://genaipro.vn/api/v1/labs/task',
+                        headers=headers,
+                        json=nonce_payload,
+                        timeout=30
+                    )
+                    if nonce_resp.status_code == 200:
+                        nonce_data = nonce_resp.json()
+                        nonce_id = nonce_data.get('task_id') or nonce_data.get('id')
+                        if not nonce_id and isinstance(nonce_data.get('data'), dict):
+                            nonce_id = nonce_data['data'].get('task_id') or nonce_data['data'].get('id')
+                        if not nonce_id and isinstance(nonce_data.get('tasks'), list) and nonce_data['tasks']:
+                            nonce_id = nonce_data['tasks'][0].get('task_id') or nonce_data['tasks'][0].get('id')
+                        if nonce_id:
+                            task_id = nonce_id
+                            task_payload = nonce_payload
+                            if log:
+                                log(f"[GenAI Pro] ✓ Fresh task submitted (expired-cache bypass): {nonce_id}. Polling...")
+                        else:
+                            if log:
+                                log(f"[GenAI Pro ERROR] Nonce re-submission had no task_id: {nonce_data}")
+                            return None
+                    else:
+                        if log:
+                            log(f"[GenAI Pro ERROR] Nonce re-submission failed: HTTP {nonce_resp.status_code}")
+                        return None
+                except Exception as nonce_err:
+                    if log:
+                        log(f"[GenAI Pro ERROR] Nonce re-submission error: {nonce_err}")
+                    return None
         
         # Step 2: Poll for task completion
         poll_interval = 2  # Poll every 2 seconds
@@ -1133,6 +1166,10 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         if retry_resp.status_code == 200:
                             retry_data = retry_resp.json()
                             new_id = retry_data.get('task_id') or retry_data.get('id')
+                            if not new_id and isinstance(retry_data.get('data'), dict):
+                                new_id = retry_data['data'].get('task_id') or retry_data['data'].get('id')
+                            if not new_id and isinstance(retry_data.get('tasks'), list) and retry_data['tasks']:
+                                new_id = retry_data['tasks'][0].get('task_id') or retry_data['tasks'][0].get('id')
                             if new_id:
                                 task_id = new_id
                                 # Update task_payload so any further re-submits keep the nonce
