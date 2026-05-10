@@ -887,7 +887,11 @@ def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
     """Build an invisible, progressively stronger nonce suffix for GenAI Pro dedupe bypass."""
     if not isinstance(base_input, str):
         base_input = '' if base_input is None else str(base_input)
-    n = max(1, int(nonce_attempt))
+    try:
+        n = int(nonce_attempt)
+    except Exception:
+        n = 1
+    n = max(1, n)
     # Mix multiple zero-width code points so retries are distinct even if one is normalized away.
     invisible_suffix = ('\u200B' * n) + ('\u2060' * n) + ('\u200C' if n % 2 else '\u200D')
     return base_input.rstrip() + invisible_suffix
