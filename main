@@ -865,7 +865,6 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         
         if log:
             log(f"[GenAI Pro] Task submitted with ID: {task_id}")
-            log(f"[GenAI Pro DEBUG] Full submission response: {task_data}")
         
         # Step 2: Poll for task completion - wait indefinitely until done or error
         poll_interval = 2  # Poll every 2 seconds to reduce API calls
@@ -949,10 +948,6 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                 status = our_task.get('status', '').lower()
                 result = our_task.get('result', '')
                 
-                # DEBUG: Log full task object every 20 seconds to see what fields are available
-                if i % 10 == 0 and log:
-                    log(f"[GenAI Pro DEBUG] Current task object: {our_task}")
-                
                 # Check if task is complete - either by status OR by result field being populated
                 # GenAI Pro fills the 'result' field with audio URL when done
                 is_complete = (status in ['completed', 'done', 'success', 'succeeded', 'finished'] or 
@@ -964,8 +959,6 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     elapsed_secs = elapsed_seconds % 60
                     if log:
                         log(f"[GenAI Pro] ✓ Audio generation complete! (took {elapsed_mins}m {elapsed_secs}s)")
-                        log(f"[GenAI Pro DEBUG] Complete task - All fields: {list(our_task.keys())}")
-                        log(f"[GenAI Pro DEBUG] Complete task - Full object: {our_task}")
                     
                     # Try multiple possible field names for the audio URL, including 'result'
                     audio_url = (our_task.get('result') or
@@ -977,15 +970,12 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     
                     if not audio_url:
                         if log:
-                            log(f"[GenAI Pro ERROR] Task completed but no audio URL found")
-                            log(f"[GenAI Pro ERROR] status={status}, result={result}")
-                            log(f"[GenAI Pro ERROR] Checked fields: result, output_url, audio_url, result_url, file_url, url")
-                            log(f"[GenAI Pro ERROR] All available fields in task: {list(our_task.keys())}")
+                            log(f"[GenAI Pro ERROR] Task completed but no audio URL found (status={status})")
                         return None
                     
                     # Step 3: Download the audio file (with retries)
                     if log:
-                        log(f"[GenAI Pro] 📥 Downloading audio file from: {audio_url}")
+                        log(f"[GenAI Pro] 📥 Downloading audio file...")
                     
                     download_ok = False
                     for dl_attempt in range(5):
@@ -1009,31 +999,47 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                             log(f"[GenAI Pro] ✅ TTS generated successfully: {output_path}")
                         return output_path
                     else:
+                        # Result URL has expired (CDN cleanup after a few days).
+                        # Re-submit a fresh task and resume polling.
                         if log:
-                            log(f"[GenAI Pro ERROR] Failed to download audio after 5 attempts")
+                            log(f"[GenAI Pro] ⚠️ Result URL expired (CDN cleanup) — re-submitting fresh TTS task...")
+                        try:
+                            retry_resp = session.post(
+                                'https://genaipro.vn/api/v1/labs/task',
+                                headers=headers,
+                                json=task_payload,
+                                timeout=30
+                            )
+                            if retry_resp.status_code == 200:
+                                retry_data = retry_resp.json()
+                                new_id = retry_data.get('task_id') or retry_data.get('id')
+                                if new_id and new_id != task_id:
+                                    task_id = new_id
+                                    i = 0
+                                    if log:
+                                        log(f"[GenAI Pro] ✓ Re-submitted. New task: {new_id}. Waiting for completion...")
+                                    continue  # resume while-True with new task_id
+                            if log:
+                                log(f"[GenAI Pro ERROR] Re-submission failed ({retry_resp.status_code}) — giving up")
+                        except Exception as retry_err:
+                            if log:
+                                log(f"[GenAI Pro ERROR] Re-submission error: {retry_err}")
                         return None
                 
                 elif status in ['failed', 'error', 'cancelled', 'canceled']:
                     if log:
-                        log(f"[GenAI Pro ERROR] ❌ Task failed with status '{status}': {our_task}")
+                        log(f"[GenAI Pro ERROR] ❌ Task failed with status '{status}'")
                     return None
                 
                 # Show status periodically for non-completed tasks
                 elif i % 10 == 0 and log and i > 0:
                     log(f"[GenAI Pro] Status: {status} (still processing...)")
             else:
-                # Task not found in response - log for debugging
+                # Task not found in response yet — log briefly at start and periodically
                 if i == 0 and log:
-                    log(f"[GenAI Pro DEBUG] Task {task_id} not found in initial status check.")
-                    log(f"[GenAI Pro DEBUG] Response type: {type(tasks)}")
-                    log(f"[GenAI Pro DEBUG] Full response: {tasks}")
+                    log(f"[GenAI Pro] Task {task_id} not found in initial status check — may still be queued...")
                 elif i % 30 == 0 and log and i > 0:
-                    log(f"[GenAI Pro DEBUG] Still waiting... Task {task_id} not found in status response.")
-                    # Log response structure periodically
-                    if isinstance(tasks, list) and len(tasks) > 0:
-                        log(f"[GenAI Pro DEBUG] Sample task structure: {tasks[0]}")
-                    elif isinstance(tasks, dict):
-                        log(f"[GenAI Pro DEBUG] Response keys: {list(tasks.keys())}")
+                    log(f"[GenAI Pro] Still waiting for task {task_id[:12] if len(task_id) > 12 else task_id}...")
             
             i += 1
         
@@ -1249,28 +1255,37 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
 
                     if not audio_url:
                         if log:
-                            log(f"[GenAI Pro Poll ERROR] No audio URL in completed task")
+                            log(f"[GenAI Pro Poll ERROR] No audio URL in completed task (status={status})")
                         return None
 
                     if log:
                         log(f"[GenAI Pro Poll] 📥 Downloading audio...")
 
-                    try:
-                        audio_response = requests.get(audio_url, timeout=30)
-                    except Exception as dl_err:
-                        if log:
-                            log(f"[GenAI Pro Poll ERROR] Download error: {dl_err}")
-                        return None
+                    download_ok = False
+                    for dl_attempt in range(5):
+                        try:
+                            audio_response = requests.get(audio_url, timeout=60)
+                            if audio_response.status_code == 200:
+                                with open(output_path, 'wb') as f:
+                                    f.write(audio_response.content)
+                                download_ok = True
+                                break
+                            else:
+                                if log:
+                                    log(f"[GenAI Pro Poll] ⚠️ Download attempt {dl_attempt+1}/5 HTTP {audio_response.status_code}")
+                        except Exception as dl_err:
+                            if log:
+                                log(f"[GenAI Pro Poll] ⚠️ Download attempt {dl_attempt+1}/5 error: {dl_err}")
+                        if dl_attempt < 4:
+                            time.sleep(3)
 
-                    if audio_response.status_code == 200:
-                        with open(output_path, 'wb') as f:
-                            f.write(audio_response.content)
+                    if download_ok:
                         if log:
                             log(f"[GenAI Pro Poll] ✅ Audio downloaded: {output_path}")
                         return output_path
                     else:
                         if log:
-                            log(f"[GenAI Pro Poll ERROR] Download failed: {audio_response.status_code}")
+                            log(f"[GenAI Pro Poll ERROR] ❌ Download failed after 5 attempts (URL may have expired)")
                         return None
 
                 elif status in ['failed', 'error', 'cancelled', 'canceled']:
