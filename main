@@ -826,11 +826,14 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             'Content-Type': 'application/json'
         }
         
+        # GenAI Pro API requires speed between 0.7 and 1.2
+        tts_speed = max(0.7, min(1.2, globals().get('TTS_SPEED', 1.0)))
+
         task_payload = {
             'input': text,
             'voice_id': voice_id,
             'model_id': 'eleven_turbo_v2_5',  # Fast model
-            'speed': globals().get('TTS_SPEED', 1.0),
+            'speed': tts_speed,
             'style': 0.0,
             'use_speaker_boost': False,
             'similarity': 0.75,
@@ -887,11 +890,10 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             if elapsed_seconds > 0 and elapsed_seconds % 1800 == 0 and log:
                 log(f"[GenAI Pro] ℹ️ Still waiting after {elapsed_seconds // 60} minutes. Will keep waiting until complete or error.")
             
-            # Wrap individual status poll in try/except so network errors
-            # don't kill the entire wait loop
+            # Poll the specific task directly (avoids pagination issues with the list endpoint)
             try:
                 status_response = session.get(
-                    'https://genaipro.vn/api/v1/labs/task',
+                    f'https://genaipro.vn/api/v1/labs/task/{task_id}',
                     headers=headers,
                     timeout=60
                 )
@@ -908,147 +910,117 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                 continue
             
             try:
-                tasks = status_response.json()
+                our_task = status_response.json()
             except Exception:
                 if log:
                     log("[GenAI Pro] ⚠️ Invalid JSON in status response — retrying...")
                 i += 1
                 continue
             
-            # Find our task in the list
-            our_task = None
-            if isinstance(tasks, list):
-                for task in tasks:
-                    # Check both 'task_id' and 'id' fields
-                    task_identifier = task.get('task_id') or task.get('id')
-                    if task_identifier == task_id:
-                        our_task = task
-                        break
-            elif isinstance(tasks, dict):
-                # Could be a single task response or a wrapper
-                task_identifier = tasks.get('task_id') or tasks.get('id')
-                if task_identifier == task_id:
-                    our_task = tasks
-                elif 'tasks' in tasks and isinstance(tasks['tasks'], list):
-                    # Response might have tasks in a 'tasks' field
-                    for task in tasks['tasks']:
-                        task_identifier = task.get('task_id') or task.get('id')
-                        if task_identifier == task_id:
-                            our_task = task
-                            break
-                elif 'data' in tasks and isinstance(tasks['data'], list):
-                    # Response might have tasks in a 'data' field
-                    for task in tasks['data']:
-                        task_identifier = task.get('task_id') or task.get('id')
-                        if task_identifier == task_id:
-                            our_task = task
-                            break
+            if not isinstance(our_task, dict):
+                if log:
+                    log(f"[GenAI Pro] ⚠️ Unexpected response format — retrying...")
+                i += 1
+                continue
+
+            status = our_task.get('status', '').lower()
+            result = our_task.get('result', '')
             
-            if our_task:
-                status = our_task.get('status', '').lower()
-                result = our_task.get('result', '')
+            # Check if task is complete - either by status OR by result field being populated
+            # GenAI Pro fills the 'result' field with audio URL when done
+            is_complete = (status in ['completed', 'done', 'success', 'succeeded', 'finished'] or 
+                          (result and result != ''))
+            
+            if is_complete:
+                elapsed_seconds = (i + 1) * poll_interval
+                elapsed_mins = elapsed_seconds // 60
+                elapsed_secs = elapsed_seconds % 60
+                if log:
+                    log(f"[GenAI Pro] ✓ Audio generation complete! (took {elapsed_mins}m {elapsed_secs}s)")
                 
-                # Check if task is complete - either by status OR by result field being populated
-                # GenAI Pro fills the 'result' field with audio URL when done
-                is_complete = (status in ['completed', 'done', 'success', 'succeeded', 'finished'] or 
-                              (result and result != ''))
+                # Try multiple possible field names for the audio URL, including 'result'
+                audio_url = (our_task.get('result') or
+                            our_task.get('output_url') or 
+                            our_task.get('audio_url') or 
+                            our_task.get('result_url') or
+                            our_task.get('file_url') or
+                            our_task.get('url'))
                 
-                if is_complete:
-                    elapsed_seconds = (i + 1) * poll_interval
-                    elapsed_mins = elapsed_seconds // 60
-                    elapsed_secs = elapsed_seconds % 60
+                if not audio_url:
                     if log:
-                        log(f"[GenAI Pro] ✓ Audio generation complete! (took {elapsed_mins}m {elapsed_secs}s)")
-                    
-                    # Try multiple possible field names for the audio URL, including 'result'
-                    audio_url = (our_task.get('result') or
-                                our_task.get('output_url') or 
-                                our_task.get('audio_url') or 
-                                our_task.get('result_url') or
-                                our_task.get('file_url') or
-                                our_task.get('url'))
-                    
-                    if not audio_url:
-                        if log:
-                            log(f"[GenAI Pro ERROR] Task completed but no audio URL found (status={status})")
-                        return None
-                    
-                    # Step 3: Download the audio file (with retries)
-                    if log:
-                        log(f"[GenAI Pro] 📥 Downloading audio file...")
-                    
-                    download_ok = False
-                    for dl_attempt in range(5):
-                        try:
-                            audio_response = requests.get(audio_url, timeout=600)
-                            if audio_response.status_code == 200:
-                                with open(output_path, 'wb') as f:
-                                    f.write(audio_response.content)
-                                download_ok = True
-                                break
-                            else:
-                                if log:
-                                    log(f"[GenAI Pro] ⚠️ Download attempt {dl_attempt+1}/5 failed: HTTP {audio_response.status_code}")
-                        except Exception as dl_err:
-                            if log:
-                                log(f"[GenAI Pro] ⚠️ Download attempt {dl_attempt+1}/5 error: {dl_err}")
-                        time.sleep(3)
-                    
-                    if download_ok:
-                        if log:
-                            log(f"[GenAI Pro] ✅ TTS generated successfully: {output_path}")
-                        return output_path
-                    else:
-                        # Result URL has expired (CDN cleanup after a few days).
-                        # The API deduplicates by text+voice, so re-submitting the identical
-                        # payload would return the same stale task_id. Add an invisible
-                        # zero-width space (U+200B) as a nonce to force a genuinely fresh task.
-                        if log:
-                            log(f"[GenAI Pro] ⚠️ Result URL expired — re-submitting with nonce to bypass cache...")
-                        try:
-                            nonce_payload = dict(task_payload)
-                            nonce_payload['input'] = task_payload['input'].rstrip() + '\u200B'
-                            retry_resp = session.post(
-                                'https://genaipro.vn/api/v1/labs/task',
-                                headers=headers,
-                                json=nonce_payload,
-                                timeout=30
-                            )
-                            if retry_resp.status_code == 200:
-                                retry_data = retry_resp.json()
-                                new_id = retry_data.get('task_id') or retry_data.get('id')
-                                if new_id:
-                                    task_id = new_id
-                                    # Update task_payload so any further re-submits keep the nonce
-                                    task_payload = nonce_payload
-                                    i = 0
-                                    if log:
-                                        log(f"[GenAI Pro] ✓ Fresh task submitted: {new_id}. Waiting for completion...")
-                                    continue  # resume while-True with fresh task_id
-                                if log:
-                                    log(f"[GenAI Pro ERROR] Re-submission response had no task_id: {retry_data}")
-                            else:
-                                if log:
-                                    log(f"[GenAI Pro ERROR] Re-submission failed: HTTP {retry_resp.status_code} — {retry_resp.text[:200]}")
-                        except Exception as retry_err:
-                            if log:
-                                log(f"[GenAI Pro ERROR] Re-submission error: {retry_err}")
-                        return None
-                
-                elif status in ['failed', 'error', 'cancelled', 'canceled']:
-                    if log:
-                        log(f"[GenAI Pro ERROR] ❌ Task failed with status '{status}'")
+                        log(f"[GenAI Pro ERROR] Task completed but no audio URL found (status={status})")
                     return None
                 
-                # Show status periodically for non-completed tasks
-                elif i % 10 == 0 and log and i > 0:
-                    log(f"[GenAI Pro] Status: {status} (still processing...)")
-            else:
-                # Task not found in response yet — log briefly at start and periodically
-                if i == 0 and log:
-                    log(f"[GenAI Pro] Task {task_id} not found in initial status check — may still be queued...")
-                elif i % 30 == 0 and log and i > 0:
-                    log(f"[GenAI Pro] Still waiting for task {task_id[:12] if len(task_id) > 12 else task_id}...")
+                # Step 3: Download the audio file (with retries)
+                if log:
+                    log(f"[GenAI Pro] 📥 Downloading audio file...")
+                
+                download_ok = False
+                for dl_attempt in range(5):
+                    try:
+                        audio_response = requests.get(audio_url, timeout=600)
+                        if audio_response.status_code == 200:
+                            with open(output_path, 'wb') as f:
+                                f.write(audio_response.content)
+                            download_ok = True
+                            break
+                        else:
+                            if log:
+                                log(f"[GenAI Pro] ⚠️ Download attempt {dl_attempt+1}/5 failed: HTTP {audio_response.status_code}")
+                    except Exception as dl_err:
+                        if log:
+                            log(f"[GenAI Pro] ⚠️ Download attempt {dl_attempt+1}/5 error: {dl_err}")
+                    time.sleep(3)
+                
+                if download_ok:
+                    if log:
+                        log(f"[GenAI Pro] ✅ TTS generated successfully: {output_path}")
+                    return output_path
+                else:
+                    # Result URL has expired (CDN cleanup after a few days).
+                    # The API deduplicates by text+voice, so re-submitting the identical
+                    # payload would return the same stale task_id. Add an invisible
+                    # zero-width space (U+200B) as a nonce to force a genuinely fresh task.
+                    if log:
+                        log(f"[GenAI Pro] ⚠️ Result URL expired — re-submitting with nonce to bypass cache...")
+                    try:
+                        nonce_payload = dict(task_payload)
+                        nonce_payload['input'] = task_payload['input'].rstrip() + '\u200B'
+                        retry_resp = session.post(
+                            'https://genaipro.vn/api/v1/labs/task',
+                            headers=headers,
+                            json=nonce_payload,
+                            timeout=30
+                        )
+                        if retry_resp.status_code == 200:
+                            retry_data = retry_resp.json()
+                            new_id = retry_data.get('task_id') or retry_data.get('id')
+                            if new_id:
+                                task_id = new_id
+                                # Update task_payload so any further re-submits keep the nonce
+                                task_payload = nonce_payload
+                                i = 0
+                                if log:
+                                    log(f"[GenAI Pro] ✓ Fresh task submitted: {new_id}. Waiting for completion...")
+                                continue  # resume while-True with fresh task_id
+                            if log:
+                                log(f"[GenAI Pro ERROR] Re-submission response had no task_id: {retry_data}")
+                        else:
+                            if log:
+                                log(f"[GenAI Pro ERROR] Re-submission failed: HTTP {retry_resp.status_code} — {retry_resp.text[:200]}")
+                    except Exception as retry_err:
+                        if log:
+                            log(f"[GenAI Pro ERROR] Re-submission error: {retry_err}")
+                    return None
+            
+            elif status in ['failed', 'error', 'cancelled', 'canceled']:
+                if log:
+                    log(f"[GenAI Pro ERROR] ❌ Task failed with status '{status}'")
+                return None
+            
+            # Show status periodically for non-completed tasks
+            elif i % 10 == 0 and log and i > 0:
+                log(f"[GenAI Pro] Status: {status} (still processing...)")
             
             i += 1
         
@@ -1109,7 +1081,7 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
             'input': text,
             'voice_id': voice_id,
             'model_id': 'eleven_turbo_v2_5',
-            'speed': globals().get('TTS_SPEED', 1.0),
+            'speed': max(0.7, min(1.2, globals().get('TTS_SPEED', 1.0))),
             'style': 0.0,
             'use_speaker_boost': False,
             'similarity': 0.75,
@@ -1195,11 +1167,12 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
             if elapsed_seconds > 0 and elapsed_seconds % 1800 == 0 and log:
                 log(f"[GenAI Pro Poll] ℹ️ Still waiting after {elapsed_seconds // 60} min")
 
+            # Poll the specific task directly (avoids pagination issues with the list endpoint)
             try:
                 status_response = session.get(
-                    'https://genaipro.vn/api/v1/labs/task',
+                    f'https://genaipro.vn/api/v1/labs/task/{task_id}',
                     headers=headers,
-                    timeout=10
+                    timeout=30
                 )
             except Exception as poll_net_err:
                 if log:
@@ -1214,98 +1187,75 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                 continue
 
             try:
-                tasks = status_response.json()
+                our_task = status_response.json()
             except Exception:
                 if log:
                     log("[GenAI Pro Poll] ⚠️ Invalid JSON in status response — retrying...")
                 i += 1
                 continue
 
-            # Find our task in the response
-            our_task = None
-            if isinstance(tasks, list):
-                for task in tasks:
-                    tid = task.get('task_id') or task.get('id')
-                    if tid == task_id:
-                        our_task = task
-                        break
-            elif isinstance(tasks, dict):
-                tid = tasks.get('task_id') or tasks.get('id')
-                if tid == task_id:
-                    our_task = tasks
-                elif 'tasks' in tasks and isinstance(tasks['tasks'], list):
-                    for task in tasks['tasks']:
-                        tid = task.get('task_id') or task.get('id')
-                        if tid == task_id:
-                            our_task = task
-                            break
-                elif 'data' in tasks and isinstance(tasks['data'], list):
-                    for task in tasks['data']:
-                        tid = task.get('task_id') or task.get('id')
-                        if tid == task_id:
-                            our_task = task
-                            break
+            if not isinstance(our_task, dict):
+                if log:
+                    log(f"[GenAI Pro Poll] ⚠️ Unexpected response format — retrying...")
+                i += 1
+                continue
 
-            if our_task:
-                status = our_task.get('status', '').lower()
-                result = our_task.get('result', '')
+            status = our_task.get('status', '').lower()
+            result = our_task.get('result', '')
 
-                is_complete = (status in ['completed', 'done', 'success', 'succeeded', 'finished'] or
-                               (result and result != ''))
+            is_complete = (status in ['completed', 'done', 'success', 'succeeded', 'finished'] or
+                           (result and result != ''))
 
-                if is_complete:
+            if is_complete:
+                if log:
+                    elapsed_seconds = (i + 1) * poll_interval
+                    log(f"[GenAI Pro Poll] ✓ Task complete! ({elapsed_seconds}s)")
+
+                audio_url = (our_task.get('result') or our_task.get('output_url') or
+                            our_task.get('audio_url') or our_task.get('result_url') or
+                            our_task.get('file_url') or our_task.get('url'))
+
+                if not audio_url:
                     if log:
-                        elapsed_seconds = (i + 1) * poll_interval
-                        log(f"[GenAI Pro Poll] ✓ Task complete! ({elapsed_seconds}s)")
-
-                    audio_url = (our_task.get('result') or our_task.get('output_url') or
-                                our_task.get('audio_url') or our_task.get('result_url') or
-                                our_task.get('file_url') or our_task.get('url'))
-
-                    if not audio_url:
-                        if log:
-                            log(f"[GenAI Pro Poll ERROR] No audio URL in completed task (status={status})")
-                        return None
-
-                    if log:
-                        log(f"[GenAI Pro Poll] 📥 Downloading audio...")
-
-                    download_ok = False
-                    for dl_attempt in range(5):
-                        try:
-                            audio_response = requests.get(audio_url, timeout=60)
-                            if audio_response.status_code == 200:
-                                with open(output_path, 'wb') as f:
-                                    f.write(audio_response.content)
-                                download_ok = True
-                                break
-                            else:
-                                if log:
-                                    log(f"[GenAI Pro Poll] ⚠️ Download attempt {dl_attempt+1}/5 HTTP {audio_response.status_code}")
-                        except Exception as dl_err:
-                            if log:
-                                log(f"[GenAI Pro Poll] ⚠️ Download attempt {dl_attempt+1}/5 error: {dl_err}")
-                        if dl_attempt < 4:
-                            time.sleep(3)
-
-                    if download_ok:
-                        if log:
-                            log(f"[GenAI Pro Poll] ✅ Audio downloaded: {output_path}")
-                        return output_path
-                    else:
-                        if log:
-                            log(f"[GenAI Pro Poll ERROR] ❌ Download failed after 5 attempts (URL may have expired)")
-                        return None
-
-                elif status in ['failed', 'error', 'cancelled', 'canceled']:
-                    if log:
-                        log(f"[GenAI Pro Poll ERROR] ❌ Task failed: {status}")
+                        log(f"[GenAI Pro Poll ERROR] No audio URL in completed task (status={status})")
                     return None
-            else:
-                if i == 0 and log:
-                    log(f"[GenAI Pro Poll] Task not found in status check yet...")
-                elif i % 30 == 0 and log and i > 0:
-                    log(f"[GenAI Pro Poll] Still waiting for task...")
+
+                if log:
+                    log(f"[GenAI Pro Poll] 📥 Downloading audio...")
+
+                download_ok = False
+                for dl_attempt in range(5):
+                    try:
+                        audio_response = requests.get(audio_url, timeout=60)
+                        if audio_response.status_code == 200:
+                            with open(output_path, 'wb') as f:
+                                f.write(audio_response.content)
+                            download_ok = True
+                            break
+                        else:
+                            if log:
+                                log(f"[GenAI Pro Poll] ⚠️ Download attempt {dl_attempt+1}/5 HTTP {audio_response.status_code}")
+                    except Exception as dl_err:
+                        if log:
+                            log(f"[GenAI Pro Poll] ⚠️ Download attempt {dl_attempt+1}/5 error: {dl_err}")
+                    if dl_attempt < 4:
+                        time.sleep(3)
+
+                if download_ok:
+                    if log:
+                        log(f"[GenAI Pro Poll] ✅ Audio downloaded: {output_path}")
+                    return output_path
+                else:
+                    if log:
+                        log(f"[GenAI Pro Poll ERROR] ❌ Download failed after 5 attempts (URL may have expired)")
+                    return None
+
+            elif status in ['failed', 'error', 'cancelled', 'canceled']:
+                if log:
+                    log(f"[GenAI Pro Poll ERROR] ❌ Task failed: {status}")
+                return None
+            elif i % 10 == 0 and log and i > 0:
+                log(f"[GenAI Pro Poll] Status: {status} (still processing...)")
 
             i += 1
 
@@ -11010,10 +10960,16 @@ class App:
     def poll_queue(self):
         try:
             processed = 0
+            log_batch = []
             while processed < 80:
                 msg = self.q.get_nowait()
                 processed += 1
                 if msg == "[SINGLE_DONE]":
+                    if log_batch:
+                        self.log_widget.config(state="normal")
+                        self.log_widget.insert(tk.END, "".join(log_batch))
+                        self.log_widget.config(state="disabled")
+                        log_batch = []
                     self.run_single_btn.config(state="normal")
                     self.run_queue_btn.config(state="normal")
                     self.log_widget.config(state="normal")
@@ -11022,6 +10978,11 @@ class App:
                     self.log_widget.see(tk.END)
                     continue
                 if msg == "[QUEUE_DONE]":
+                    if log_batch:
+                        self.log_widget.config(state="normal")
+                        self.log_widget.insert(tk.END, "".join(log_batch))
+                        self.log_widget.config(state="disabled")
+                        log_batch = []
                     self.run_queue_btn.config(state="normal")
                     self.run_single_btn.config(state="normal")
                     self.log_widget.config(state="normal")
@@ -11029,19 +10990,28 @@ class App:
                     self.log_widget.config(state="disabled")
                     self.log_widget.see(tk.END)
                     continue
+                line = str(msg)
+                if not line.endswith("\n"):
+                    line += "\n"
+                log_batch.append(line)
+            # Flush remaining log lines in one batch (3 widget ops instead of 4 per message)
+            if log_batch:
                 self.log_widget.config(state="normal")
-                self.log_widget.insert(tk.END, str(msg))
-                if not str(msg).endswith("\n"):
-                    self.log_widget.insert(tk.END, "\n")
+                self.log_widget.insert(tk.END, "".join(log_batch))
                 self.log_widget.config(state="disabled")
                 self.log_widget.see(tk.END)
         except queue.Empty:
-            pass
+            if log_batch:
+                self.log_widget.config(state="normal")
+                self.log_widget.insert(tk.END, "".join(log_batch))
+                self.log_widget.config(state="disabled")
+                self.log_widget.see(tk.END)
         self.root.after(200, self.poll_queue)
         try:
             self._update_color_canvases()
         except Exception:
             pass
+
 
 
 # ----------------- entrypoint -----------------
