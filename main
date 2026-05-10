@@ -950,17 +950,42 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             inner = task_data['data']
             task_id = inner.get('task_id') or inner.get('id')
         # Handle list-style response: {'limit': N, 'page': N, 'tasks': [{'id': ..., ...}]}
-        if not task_id and isinstance(task_data.get('tasks'), list) and task_data['tasks']:
-            first_task = task_data['tasks'][0]
-            task_id = first_task.get('task_id') or first_task.get('id')
-        
+        _submission_tasks = task_data['tasks'] if isinstance(task_data.get('tasks'), list) else []
+        if not task_id and _submission_tasks:
+            task_id = _submission_tasks[0].get('task_id') or _submission_tasks[0].get('id')
+
         if not task_id:
             if log:
                 log(f"[GenAI Pro ERROR] No task_id in response: {str(task_data)[:400]}")
             return None
-        
+
         if log:
             log(f"[GenAI Pro] Task submitted with ID: {task_id}")
+
+        # If the submission response already contains a completed task with an audio URL, download immediately
+        if _submission_tasks:
+            _sub = _submission_tasks[0]
+            _sub_status = _sub.get('status', '').lower()
+            _sub_result = (_sub.get('result') or _sub.get('audio_url') or
+                           _sub.get('output_url') or _sub.get('file_url') or _sub.get('url') or '')
+            if ((_sub_status in ['completed', 'done', 'success', 'succeeded', 'finished'] or _sub_result)
+                    and isinstance(_sub_result, str) and _sub_result.startswith('http')):
+                if log:
+                    log(f"[GenAI Pro] 🎯 Task already completed in submission response — downloading immediately...")
+                try:
+                    audio_response = requests.get(_sub_result, timeout=120)
+                    if audio_response.status_code == 200:
+                        with open(output_path, 'wb') as f:
+                            f.write(audio_response.content)
+                        if log:
+                            log(f"[GenAI Pro] ✅ TTS generated successfully (cached): {output_path}")
+                        return output_path
+                    elif log:
+                        log(f"[GenAI Pro ERROR] Cached audio download failed: HTTP {audio_response.status_code}")
+                except Exception as dl_err:
+                    if log:
+                        log(f"[GenAI Pro ERROR] Cached audio download error: {dl_err}")
+                # Fall through to polling in case the CDN URL is temporarily unavailable
         
         # Step 2: Poll for task completion
         poll_interval = 2  # Poll every 2 seconds
