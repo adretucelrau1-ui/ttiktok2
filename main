@@ -897,6 +897,42 @@ def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
     return base_input.rstrip() + invisible_suffix
 
 
+def _build_genaipro_retry_payload(base_payload, retry_attempt=1):
+    """Build a fresh retry payload that avoids server-side dedupe collisions."""
+    payload = dict(base_payload or {})
+    try:
+        attempt = max(1, int(retry_attempt))
+    except Exception:
+        attempt = 1
+
+    # Always change text with a stronger invisible nonce.
+    payload['input'] = _build_genaipro_nonce_input(payload.get('input'), attempt)
+
+    # Also slightly vary synthesis knobs so retries are unique even if input is normalized.
+    sign = 1 if (attempt % 2) else -1
+
+    def _to_float(value, default):
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _clamp(value, lo, hi):
+        return max(lo, min(hi, value))
+
+    base_speed = _to_float(payload.get('speed', 1.0), 1.0)
+    base_stability = _to_float(payload.get('stability', 0.5), 0.5)
+    base_similarity = _to_float(payload.get('similarity', 0.75), 0.75)
+    base_style = _to_float(payload.get('style', 0.0), 0.0)
+    step = min(0.05, 0.01 * attempt)
+
+    payload['speed'] = round(_clamp(base_speed + (sign * step), GENAIPRO_MIN_SPEED, GENAIPRO_MAX_SPEED), 3)
+    payload['stability'] = round(_clamp(base_stability + (sign * step), 0.0, 1.0), 3)
+    payload['similarity'] = round(_clamp(base_similarity - (sign * step), 0.0, 1.0), 3)
+    payload['style'] = round(_clamp(base_style + (0.5 * step), 0.0, 1.0), 3)
+    return payload
+
+
 def _normalize_genaipro_api_key(api_key):
     """Normalize a GenAI Pro JWT pasted by the user."""
     if api_key is None:
@@ -1087,43 +1123,47 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     if log:
                         log(f"[GenAI Pro ERROR] Cached audio download error: {dl_err} — re-submitting with nonce")
                 # The cached result URL is expired/broken — force a fresh task via nonce and let polling handle it
-                try:
-                    nonce_payload = dict(task_payload)
-                    nonce_retry_count += 1
-                    nonce_payload['input'] = _build_genaipro_nonce_input(task_payload.get('input'), nonce_retry_count)
-                    nonce_resp = session.post(
-                        'https://genaipro.vn/api/v1/labs/task',
-                        headers=headers,
-                        json=nonce_payload,
-                        timeout=30
-                    )
-                    if nonce_resp.status_code == 200:
+                fresh_task_found = False
+                while nonce_retry_count < max_nonce_retries:
+                    try:
+                        nonce_retry_count += 1
+                        nonce_payload = _build_genaipro_retry_payload(task_payload, nonce_retry_count)
+                        nonce_resp = session.post(
+                            'https://genaipro.vn/api/v1/labs/task',
+                            headers=headers,
+                            json=nonce_payload,
+                            timeout=30
+                        )
+                        if nonce_resp.status_code not in (200, 201, 202):
+                            if log:
+                                log(f"[GenAI Pro ERROR] Nonce re-submission failed: HTTP {nonce_resp.status_code}")
+                            continue
                         nonce_data = nonce_resp.json()
                         nonce_id, _ = _extract_submission_task_id(
                             nonce_data,
                             expected_input=nonce_payload.get('input'),
                             expected_voice_id=voice_id
                         )
-                        if nonce_id:
-                            if str(nonce_id) == str(task_id):
-                                if log:
-                                    log(f"[GenAI Pro ERROR] Nonce re-submission returned the same task ID ({nonce_id}); aborting to avoid endless stale-loop")
-                                return None
-                            task_id = nonce_id
-                            task_payload = nonce_payload
-                            if log:
-                                log(f"[GenAI Pro] ✓ Fresh task submitted (expired-cache bypass): {nonce_id}. Polling...")
-                        else:
+                        if not nonce_id:
                             if log:
                                 log(f"[GenAI Pro ERROR] Nonce re-submission had no task_id: {nonce_data}")
-                            return None
-                    else:
+                            continue
+                        if str(nonce_id) == str(task_id):
+                            if log:
+                                log(f"[GenAI Pro] Nonce re-submission returned same task ID ({nonce_id}); retrying with stronger nonce...")
+                            continue
+                        task_id = nonce_id
+                        task_payload = nonce_payload
+                        fresh_task_found = True
                         if log:
-                            log(f"[GenAI Pro ERROR] Nonce re-submission failed: HTTP {nonce_resp.status_code}")
-                        return None
-                except Exception as nonce_err:
+                            log(f"[GenAI Pro] ✓ Fresh task submitted (expired-cache bypass): {nonce_id}. Polling...")
+                        break
+                    except Exception as nonce_err:
+                        if log:
+                            log(f"[GenAI Pro ERROR] Nonce re-submission error: {nonce_err}")
+                if not fresh_task_found:
                     if log:
-                        log(f"[GenAI Pro ERROR] Nonce re-submission error: {nonce_err}")
+                        log(f"[GenAI Pro ERROR] Could not obtain a fresh task after {nonce_retry_count} nonce retries")
                     return None
         
         # Step 2: Poll for task completion
@@ -1265,9 +1305,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                             if log:
                                 log(f"[GenAI Pro ERROR] Reached max nonce retries ({max_nonce_retries}) without a downloadable file")
                             return None
-                        nonce_payload = dict(task_payload)
                         nonce_retry_count += 1
-                        nonce_payload['input'] = _build_genaipro_nonce_input(task_payload.get('input'), nonce_retry_count)
+                        nonce_payload = _build_genaipro_retry_payload(task_payload, nonce_retry_count)
                         retry_resp = session.post(
                             'https://genaipro.vn/api/v1/labs/task',
                             headers=headers,
@@ -1284,8 +1323,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                             if new_id:
                                 if str(new_id) == str(task_id):
                                     if log:
-                                        log(f"[GenAI Pro ERROR] Re-submission returned same task ID ({new_id}); stopping to avoid infinite retries")
-                                    return None
+                                        log(f"[GenAI Pro] Re-submission returned same task ID ({new_id}); retrying with stronger nonce...")
+                                    continue
                                 task_id = new_id
                                 # Update task_payload so any further re-submits keep the nonce
                                 task_payload = nonce_payload
@@ -1599,9 +1638,8 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                         log(f"[GenAI Pro Poll] ⚠️ Result URL expired — re-submitting with nonce to bypass cache...")
 
                     try:
-                        nonce_payload = dict(task_payload)
                         nonce_retry_count += 1
-                        nonce_payload['input'] = _build_genaipro_nonce_input(task_payload.get('input'), nonce_retry_count)
+                        nonce_payload = _build_genaipro_retry_payload(task_payload, nonce_retry_count)
                         retry_resp = session.post(
                             'https://genaipro.vn/api/v1/labs/task',
                             headers=request_headers,
@@ -1618,8 +1656,8 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                             if new_id:
                                 if str(new_id) == str(task_id):
                                     if log:
-                                        log(f"[GenAI Pro Poll ERROR] Re-submission returned same task ID ({new_id}); stopping to avoid infinite retries")
-                                    return None
+                                        log(f"[GenAI Pro Poll] Re-submission returned same task ID ({new_id}); retrying with stronger nonce...")
+                                    continue
                                 task_id = new_id
                                 task_payload = nonce_payload
                                 i = 0
