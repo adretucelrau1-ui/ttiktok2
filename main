@@ -883,6 +883,36 @@ def _extract_submission_task_id(task_data, expected_input=None, expected_voice_i
     return None, None
 
 
+def _refresh_genaipro_result_url(session, headers, task_id, log=None, log_prefix='[GenAI Pro]'):
+    """Re-fetch an existing task and return the newest result/audio URL, if available."""
+    if not task_id:
+        return None
+    if log:
+        log(f"{log_prefix} Refreshing task result URL from existing task_id before nonce re-submit...")
+    urls = (
+        f'https://genaipro.vn/api/v1/labs/task/{task_id}',
+        'https://genaipro.vn/api/v1/labs/task?limit=100',
+    )
+    for url in urls:
+        try:
+            resp = session.get(url, headers=headers, timeout=60)
+            if resp.status_code not in (200, 201, 202):
+                continue
+            data = resp.json()
+            task = _find_task_in_genaipro_response(data, task_id)
+            if not isinstance(task, dict):
+                continue
+            refreshed_url = (
+                task.get('result') or task.get('output_url') or task.get('audio_url') or
+                task.get('result_url') or task.get('file_url') or task.get('url')
+            )
+            if isinstance(refreshed_url, str) and refreshed_url.startswith('http'):
+                return refreshed_url
+        except Exception:
+            continue
+    return None
+
+
 def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
     """Build an invisible, progressively stronger nonce marker for GenAI Pro dedupe bypass."""
     if not isinstance(base_input, str):
@@ -1130,6 +1160,27 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                 except Exception as dl_err:
                     if log:
                         log(f"[GenAI Pro ERROR] Cached audio download error: {dl_err} — re-submitting with nonce")
+                refreshed_url = _refresh_genaipro_result_url(
+                    session=session,
+                    headers=headers,
+                    task_id=task_id,
+                    log=log,
+                    log_prefix='[GenAI Pro]'
+                )
+                if refreshed_url:
+                    try:
+                        audio_response = requests.get(refreshed_url, timeout=120)
+                        if audio_response.status_code == 200:
+                            with open(output_path, 'wb') as f:
+                                f.write(audio_response.content)
+                            if log:
+                                log(f"[GenAI Pro] ✅ TTS generated successfully (refreshed task URL): {output_path}")
+                            return output_path
+                        elif log:
+                            log(f"[GenAI Pro] Refreshed task URL download failed: HTTP {audio_response.status_code} — trying nonce re-submit")
+                    except Exception as refresh_dl_err:
+                        if log:
+                            log(f"[GenAI Pro] Refreshed task URL download error: {refresh_dl_err} — trying nonce re-submit")
                 # The cached result URL is expired/broken — force a fresh task via nonce and let polling handle it
                 fresh_task_found = False
                 while nonce_retry_count < max_nonce_retries:
@@ -1302,6 +1353,32 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         log(f"[GenAI Pro] ✅ TTS generated successfully: {output_path}")
                     return output_path
                 else:
+                    refreshed_url = _refresh_genaipro_result_url(
+                        session=session,
+                        headers=headers,
+                        task_id=task_id,
+                        log=log,
+                        log_prefix='[GenAI Pro]'
+                    )
+                    if refreshed_url:
+                        if log:
+                            log("[GenAI Pro] 📥 Retrying download with refreshed task URL...")
+                        for refresh_attempt in range(3):
+                            try:
+                                refresh_resp = requests.get(refreshed_url, timeout=600)
+                                if refresh_resp.status_code == 200:
+                                    with open(output_path, 'wb') as f:
+                                        f.write(refresh_resp.content)
+                                    if log:
+                                        log(f"[GenAI Pro] ✅ TTS generated successfully (refreshed task URL): {output_path}")
+                                    return output_path
+                                elif log:
+                                    log(f"[GenAI Pro] ⚠️ Refreshed URL attempt {refresh_attempt+1}/3 failed: HTTP {refresh_resp.status_code}")
+                            except Exception as refresh_dl_err:
+                                if log:
+                                    log(f"[GenAI Pro] ⚠️ Refreshed URL attempt {refresh_attempt+1}/3 error: {refresh_dl_err}")
+                            if refresh_attempt < 2:
+                                time.sleep(2)
                     # Result URL has expired (CDN cleanup after a few days).
                     # The API deduplicates by text+voice, so re-submitting the identical
                     # payload would return the same stale task_id. Add an invisible
@@ -1632,6 +1709,32 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                         log(f"[GenAI Pro Poll] ✅ Audio downloaded: {output_path}")
                     return output_path
                 else:
+                    refreshed_url = _refresh_genaipro_result_url(
+                        session=session,
+                        headers=request_headers,
+                        task_id=task_id,
+                        log=log,
+                        log_prefix='[GenAI Pro Poll]'
+                    )
+                    if refreshed_url:
+                        if log:
+                            log("[GenAI Pro Poll] 📥 Retrying download with refreshed task URL...")
+                        for refresh_attempt in range(3):
+                            try:
+                                refresh_resp = requests.get(refreshed_url, timeout=60)
+                                if refresh_resp.status_code == 200:
+                                    with open(output_path, 'wb') as f:
+                                        f.write(refresh_resp.content)
+                                    if log:
+                                        log(f"[GenAI Pro Poll] ✅ Audio downloaded (refreshed task URL): {output_path}")
+                                    return output_path
+                                elif log:
+                                    log(f"[GenAI Pro Poll] ⚠️ Refreshed URL attempt {refresh_attempt+1}/3 HTTP {refresh_resp.status_code}")
+                            except Exception as refresh_dl_err:
+                                if log:
+                                    log(f"[GenAI Pro Poll] ⚠️ Refreshed URL attempt {refresh_attempt+1}/3 error: {refresh_dl_err}")
+                            if refresh_attempt < 2:
+                                time.sleep(2)
                     if not task_payload:
                         if log:
                             log(f"[GenAI Pro Poll ERROR] ❌ Download failed after 5 attempts (URL may have expired)")
