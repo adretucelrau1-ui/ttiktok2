@@ -1000,27 +1000,36 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         return output_path
                     else:
                         # Result URL has expired (CDN cleanup after a few days).
-                        # Re-submit a fresh task and resume polling.
+                        # The API deduplicates by text+voice, so re-submitting the identical
+                        # payload would return the same stale task_id. Add an invisible
+                        # zero-width space (U+200B) as a nonce to force a genuinely fresh task.
                         if log:
-                            log(f"[GenAI Pro] ⚠️ Result URL expired (CDN cleanup) — re-submitting fresh TTS task...")
+                            log(f"[GenAI Pro] ⚠️ Result URL expired — re-submitting with nonce to bypass cache...")
                         try:
+                            nonce_payload = dict(task_payload)
+                            nonce_payload['input'] = task_payload['input'].rstrip() + '\u200B'
                             retry_resp = session.post(
                                 'https://genaipro.vn/api/v1/labs/task',
                                 headers=headers,
-                                json=task_payload,
+                                json=nonce_payload,
                                 timeout=30
                             )
                             if retry_resp.status_code == 200:
                                 retry_data = retry_resp.json()
                                 new_id = retry_data.get('task_id') or retry_data.get('id')
-                                if new_id and new_id != task_id:
+                                if new_id:
                                     task_id = new_id
+                                    # Update task_payload so any further re-submits keep the nonce
+                                    task_payload = nonce_payload
                                     i = 0
                                     if log:
-                                        log(f"[GenAI Pro] ✓ Re-submitted. New task: {new_id}. Waiting for completion...")
-                                    continue  # resume while-True with new task_id
-                            if log:
-                                log(f"[GenAI Pro ERROR] Re-submission failed ({retry_resp.status_code}) — giving up")
+                                        log(f"[GenAI Pro] ✓ Fresh task submitted: {new_id}. Waiting for completion...")
+                                    continue  # resume while-True with fresh task_id
+                                if log:
+                                    log(f"[GenAI Pro ERROR] Re-submission response had no task_id: {retry_data}")
+                            else:
+                                if log:
+                                    log(f"[GenAI Pro ERROR] Re-submission failed: HTTP {retry_resp.status_code} — {retry_resp.text[:200]}")
                         except Exception as retry_err:
                             if log:
                                 log(f"[GenAI Pro ERROR] Re-submission error: {retry_err}")
@@ -11000,8 +11009,10 @@ class App:
 
     def poll_queue(self):
         try:
-            while True:
+            processed = 0
+            while processed < 80:
                 msg = self.q.get_nowait()
+                processed += 1
                 if msg == "[SINGLE_DONE]":
                     self.run_single_btn.config(state="normal")
                     self.run_queue_btn.config(state="normal")
