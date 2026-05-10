@@ -804,13 +804,21 @@ def _find_task_in_genaipro_response(data, task_id):
     return None
 
 
-def _select_submission_task(tasks, expected_input=None, expected_voice_id=None):
+def _select_submission_task(tasks, expected_input=None, expected_voice_id=None, exclude_task_id=None):
     """Select the best task candidate from a submission/list response."""
     if not isinstance(tasks, list):
         return None
     candidates = [t for t in tasks if isinstance(t, dict)]
     if not candidates:
         return None
+
+    # When retrying, exclude the known stale task so we don't re-select it.
+    if exclude_task_id is not None:
+        exclude_str = str(exclude_task_id)
+        candidates = [t for t in candidates
+                      if str(t.get('id') or t.get('task_id') or '') != exclude_str]
+        if not candidates:
+            return None
 
     # Prefer exact input+voice match (for nonce re-submit flows)
     if expected_input is not None:
@@ -847,7 +855,7 @@ def _select_submission_task(tasks, expected_input=None, expected_voice_id=None):
     return max(candidates, key=_time_key)
 
 
-def _extract_submission_task_id(task_data, expected_input=None, expected_voice_id=None):
+def _extract_submission_task_id(task_data, expected_input=None, expected_voice_id=None, exclude_task_id=None):
     """Extract a task_id from GenAI Pro submit response across all known shapes."""
     if isinstance(task_data, dict):
         task_id = task_data.get('task_id') or task_data.get('id')
@@ -863,7 +871,8 @@ def _extract_submission_task_id(task_data, expected_input=None, expected_voice_i
         selected = _select_submission_task(
             task_data.get('tasks'),
             expected_input=expected_input,
-            expected_voice_id=expected_voice_id
+            expected_voice_id=expected_voice_id,
+            exclude_task_id=exclude_task_id
         )
         if selected:
             return selected.get('task_id') or selected.get('id'), selected
@@ -872,7 +881,8 @@ def _extract_submission_task_id(task_data, expected_input=None, expected_voice_i
         selected = _select_submission_task(
             task_data,
             expected_input=expected_input,
-            expected_voice_id=expected_voice_id
+            expected_voice_id=expected_voice_id,
+            exclude_task_id=exclude_task_id
         )
         if selected:
             return selected.get('task_id') or selected.get('id'), selected
@@ -1216,7 +1226,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         nonce_id, _ = _extract_submission_task_id(
                             nonce_data,
                             expected_input=nonce_payload.get('input'),
-                            expected_voice_id=voice_id
+                            expected_voice_id=voice_id,
+                            exclude_task_id=task_id
                         )
                         if not nonce_id:
                             if log:
@@ -1418,7 +1429,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                             new_id, _ = _extract_submission_task_id(
                                 retry_data,
                                 expected_input=nonce_payload.get('input'),
-                                expected_voice_id=voice_id
+                                expected_voice_id=voice_id,
+                                exclude_task_id=task_id
                             )
                             if new_id:
                                 if str(new_id) == str(task_id):
@@ -1777,7 +1789,8 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                             new_id, _ = _extract_submission_task_id(
                                 retry_data,
                                 expected_input=nonce_payload.get('input'),
-                                expected_voice_id=voice_id
+                                expected_voice_id=voice_id,
+                                exclude_task_id=task_id
                             )
                             if new_id:
                                 if str(new_id) == str(task_id):
