@@ -965,6 +965,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         if log:
             log(f"[GenAI Pro] Waiting for audio generation... (max {max_wait_seconds // 60}m)")
         consecutive_non200 = 0  # Track repeated failures on per-task endpoint
+        i = 0
         while True:
             time.sleep(poll_interval)
             
