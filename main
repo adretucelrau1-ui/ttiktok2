@@ -745,6 +745,7 @@ def _openai_tts_generate(text, language='en', output_path=None, log=None):
 
 
 # GenAI Pro API constraints
+GENAIPRO_API_BASE = 'https://api.genaipro.io'  # Correct API base URL (per docs.genaipro.io)
 GENAIPRO_MIN_SPEED = 0.7     # Minimum TTS speed accepted by the API
 GENAIPRO_MAX_SPEED = 1.2     # Maximum TTS speed accepted by the API
 GENAIPRO_MAX_WAIT_SECONDS = 600  # Max time to wait for a TTS task (10 minutes)
@@ -753,7 +754,7 @@ GENAIPRO_MAX_WAIT_SECONDS = 600  # Max time to wait for a TTS task (10 minutes)
 def _genaipro_session(requests_module):
     """Return a requests.Session that preserves the Authorization header across redirects.
     Python's default behaviour strips it when following cross-domain redirects, which
-    causes genaipro.vn to report token_is_empty even when a valid JWT is supplied."""
+    causes genaipro.io to report token_is_empty even when a valid JWT is supplied."""
     class _KeepAuthSession(requests_module.Session):
         def rebuild_auth(self, prepared_request, response):
             # Do NOT strip the Authorization header on redirect
@@ -763,7 +764,7 @@ def _genaipro_session(requests_module):
 
 def _find_task_in_genaipro_response(data, task_id):
     """
-    Locate a specific task in any response shape returned by genaipro.vn.
+    Locate a specific task in any response shape returned by genaipro.io.
     Handles multiple formats:
       - Per-task dict:          {"id": "...", "status": "...", "result": "..."}
       - Wrapped single dict:    {"data": {"id": "...", "status": "..."}, "success": true}
@@ -897,8 +898,8 @@ def _refresh_genaipro_result_url(session, headers, task_id, log=None, log_prefix
     if log:
         log(f"{log_prefix} Refreshing task result URL from existing task_id before nonce re-submit...")
     urls = (
-        f'https://genaipro.vn/api/v1/labs/task/{task_id}',
-        'https://genaipro.vn/api/v1/labs/task?limit=100',
+        f'{GENAIPRO_API_BASE}/v1/labs/task/{task_id}',
+        f'{GENAIPRO_API_BASE}/v1/labs/task?limit=100',
     )
     for url in urls:
         try:
@@ -1092,7 +1093,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         max_nonce_retries = 6
         
         response = session.post(
-            'https://genaipro.vn/api/v1/labs/task',
+            f'{GENAIPRO_API_BASE}/v1/labs/task',
             headers=headers,
             json=task_payload,
             timeout=30
@@ -1104,7 +1105,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                 log(f"[GenAI Pro ERROR] Task submission failed: {response.status_code} - {err_body}")
                 if response.status_code == 401:
                     log("[GenAI Pro ERROR] ❌ Authentication failed — your GenAI Pro JWT token has expired or is invalid.")
-                    log("[GenAI Pro ERROR] ➡️  Please log in again at https://genaipro.vn, copy your new JWT token,")
+                    log("[GenAI Pro ERROR] ➡️  Please log in again at https://genaipro.io, copy your new JWT token,")
                     log("[GenAI Pro ERROR]     and paste it in the 'TTS API Key' field, then click 'Save API Key'.")
             return None
         
@@ -1213,7 +1214,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         nonce_retry_count += 1
                         nonce_payload = _build_genaipro_retry_payload(task_payload, nonce_retry_count)
                         nonce_resp = session.post(
-                            'https://genaipro.vn/api/v1/labs/task',
+                            f'{GENAIPRO_API_BASE}/v1/labs/task',
                             headers=headers,
                             json=nonce_payload,
                             timeout=30
@@ -1280,9 +1281,9 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             # Try per-task endpoint first; fall back to list endpoint after repeated failures
             use_list_fallback = consecutive_non200 >= 3
             if use_list_fallback:
-                poll_url = 'https://genaipro.vn/api/v1/labs/task?limit=100'
+                poll_url = f'{GENAIPRO_API_BASE}/v1/labs/task?limit=100'
             else:
-                poll_url = f'https://genaipro.vn/api/v1/labs/task/{task_id}'
+                poll_url = f'{GENAIPRO_API_BASE}/v1/labs/task/{task_id}'
 
             try:
                 status_response = session.get(
@@ -1419,7 +1420,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         nonce_retry_count += 1
                         nonce_payload = _build_genaipro_retry_payload(task_payload, nonce_retry_count)
                         retry_resp = session.post(
-                            'https://genaipro.vn/api/v1/labs/task',
+                            f'{GENAIPRO_API_BASE}/v1/labs/task',
                             headers=headers,
                             json=nonce_payload,
                             timeout=30
@@ -1536,7 +1537,7 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
             log(f"[GenAI Pro Submit] Submitting TTS task ({len(text)} chars)... [token: {token_preview}]")
 
         response = session.post(
-            'https://genaipro.vn/api/v1/labs/task',
+            f'{GENAIPRO_API_BASE}/v1/labs/task',
             headers=headers,
             json=task_payload,
             timeout=30
@@ -1548,7 +1549,7 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
                 log(f"[GenAI Pro Submit ERROR] {response.status_code} - {err_body}")
                 if response.status_code == 401:
                     log("[GenAI Pro Submit ERROR] ❌ Authentication failed — your GenAI Pro JWT token has expired or is invalid.")
-                    log("[GenAI Pro Submit ERROR] ➡️  Please log in again at https://genaipro.vn, copy your new JWT token,")
+                    log("[GenAI Pro Submit ERROR] ➡️  Please log in again at https://genaipro.io, copy your new JWT token,")
                     log("[GenAI Pro Submit ERROR]     and paste it in the 'TTS API Key' field, then click 'Save API Key'.")
             return None, None
 
@@ -1645,9 +1646,9 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
             # Try per-task endpoint first; fall back to list endpoint after repeated failures
             use_list_fallback = consecutive_non200 >= 3
             if use_list_fallback:
-                poll_url = 'https://genaipro.vn/api/v1/labs/task?limit=100'
+                poll_url = f'{GENAIPRO_API_BASE}/v1/labs/task?limit=100'
             else:
-                poll_url = f'https://genaipro.vn/api/v1/labs/task/{task_id}'
+                poll_url = f'{GENAIPRO_API_BASE}/v1/labs/task/{task_id}'
 
             try:
                 status_response = session.get(
@@ -1779,7 +1780,7 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
                         nonce_retry_count += 1
                         nonce_payload = _build_genaipro_retry_payload(task_payload, nonce_retry_count)
                         retry_resp = session.post(
-                            'https://genaipro.vn/api/v1/labs/task',
+                            f'{GENAIPRO_API_BASE}/v1/labs/task',
                             headers=request_headers,
                             json=nonce_payload,
                             timeout=30
