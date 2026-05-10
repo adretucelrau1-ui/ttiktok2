@@ -884,7 +884,7 @@ def _extract_submission_task_id(task_data, expected_input=None, expected_voice_i
 
 
 def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
-    """Build an invisible, progressively stronger nonce suffix for GenAI Pro dedupe bypass."""
+    """Build an invisible, progressively stronger nonce marker for GenAI Pro dedupe bypass."""
     if not isinstance(base_input, str):
         base_input = '' if base_input is None else str(base_input)
     try:
@@ -893,8 +893,16 @@ def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
         n = 1
     n = max(1, n)
     # Mix multiple zero-width code points so retries are distinct even if one is normalized away.
-    invisible_suffix = ('\u200B' * n) + ('\u2060' * n) + ('\u200C' if n % 2 else '\u200D')
-    return base_input.rstrip() + invisible_suffix
+    # Place nonce at the start and early inside the text as well (not just tail) so it still
+    # affects dedupe even when very long text is truncated server-side.
+    prefix = ('\u2060' * n) + ('\u200B' if n % 2 else '\u200C')
+    mid = ('\u200B' * n) + ('\u200C' if n % 2 else '\u200D')
+    suffix = ('\u200D' * min(n, 4))
+    text = base_input.rstrip()
+    if not text:
+        return prefix + mid + suffix
+    insert_at = min(max(1, len(text) // 3), 64)
+    return prefix + text[:insert_at] + mid + text[insert_at:] + suffix
 
 
 def _build_genaipro_retry_payload(base_payload, retry_attempt=1):
