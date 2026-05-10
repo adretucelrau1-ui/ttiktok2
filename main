@@ -747,6 +747,12 @@ def _openai_tts_generate(text, language='en', output_path=None, log=None):
         return None
 
 
+# GenAI Pro API constraints
+GENAIPRO_MIN_SPEED = 0.7     # Minimum TTS speed accepted by the API
+GENAIPRO_MAX_SPEED = 1.2     # Maximum TTS speed accepted by the API
+GENAIPRO_MAX_WAIT_SECONDS = 600  # Max time to wait for a TTS task (10 minutes)
+
+
 def _genaipro_session(requests_module):
     """Return a requests.Session that preserves the Authorization header across redirects.
     Python's default behaviour strips it when following cross-domain redirects, which
@@ -860,7 +866,7 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         }
         
         # GenAI Pro API requires speed between 0.7 and 1.2
-        tts_speed = max(0.7, min(1.2, globals().get('TTS_SPEED', 1.0)))
+        tts_speed = max(GENAIPRO_MIN_SPEED, min(GENAIPRO_MAX_SPEED, globals().get('TTS_SPEED', 1.0)))
 
         task_payload = {
             'input': text,
@@ -904,12 +910,10 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         
         # Step 2: Poll for task completion
         poll_interval = 2  # Poll every 2 seconds
-        max_wait_seconds = 600  # 10 minutes maximum
-        
+        max_wait_seconds = GENAIPRO_MAX_WAIT_SECONDS
+
         if log:
             log(f"[GenAI Pro] Waiting for audio generation... (max {max_wait_seconds // 60}m)")
-        
-        i = 0
         consecutive_non200 = 0  # Track repeated failures on per-task endpoint
         while True:
             time.sleep(poll_interval)
@@ -1136,7 +1140,7 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
             'input': text,
             'voice_id': voice_id,
             'model_id': 'eleven_turbo_v2_5',
-            'speed': max(0.7, min(1.2, globals().get('TTS_SPEED', 1.0))),
+            'speed': max(GENAIPRO_MIN_SPEED, min(GENAIPRO_MAX_SPEED, globals().get('TTS_SPEED', 1.0))),
             'style': 0.0,
             'use_speaker_boost': False,
             'similarity': 0.75,
@@ -1204,7 +1208,7 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
             os.close(fd)
 
         poll_interval = 2
-        max_wait_seconds = 600  # 10 minutes maximum
+        max_wait_seconds = GENAIPRO_MAX_WAIT_SECONDS
         tag = task_id[:8] if len(task_id) > 8 else task_id
         if log:
             log(f"[GenAI Pro Poll] Waiting for task {tag}... (max {max_wait_seconds // 60}m)")
