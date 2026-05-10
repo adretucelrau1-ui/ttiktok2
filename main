@@ -944,11 +944,15 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     log(f"[GenAI Pro ERROR] Direct audio download error: {dl_err}")
             return None
 
-        # GenAI Pro might return 'task_id' or 'id' field (or nested under 'data')
+        # GenAI Pro might return 'task_id' or 'id' field (or nested under 'data' or 'tasks' list)
         task_id = task_data.get('task_id') or task_data.get('id')
         if not task_id and isinstance(task_data.get('data'), dict):
             inner = task_data['data']
             task_id = inner.get('task_id') or inner.get('id')
+        # Handle list-style response: {'limit': N, 'page': N, 'tasks': [{'id': ..., ...}]}
+        if not task_id and isinstance(task_data.get('tasks'), list) and task_data['tasks']:
+            first_task = task_data['tasks'][0]
+            task_id = first_task.get('task_id') or first_task.get('id')
         
         if not task_id:
             if log:
@@ -1233,6 +1237,10 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
         if not task_id and isinstance(task_data.get('data'), dict):
             inner = task_data['data']
             task_id = inner.get('task_id') or inner.get('id')
+        # Handle list-style response: {'limit': N, 'page': N, 'tasks': [{'id': ..., ...}]}
+        if not task_id and isinstance(task_data.get('tasks'), list) and task_data['tasks']:
+            first_task = task_data['tasks'][0]
+            task_id = first_task.get('task_id') or first_task.get('id')
 
         if not task_id:
             if log:
