@@ -935,6 +935,16 @@ def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
     return prefix + text[:insert_at] + mid + text[insert_at:] + suffix
 
 
+_GENAIPRO_FALLBACK_MODELS = [
+    'eleven_turbo_v2_5',
+    'eleven_multilingual_v2',
+    'eleven_turbo_v2',
+    'eleven_flash_v2_5',
+    'eleven_flash_v2',
+    'eleven_turbo_v2_5',
+]
+
+
 def _build_genaipro_retry_payload(base_payload, retry_attempt=1):
     """Build a fresh retry payload that avoids server-side dedupe collisions."""
     payload = dict(base_payload or {})
@@ -945,6 +955,14 @@ def _build_genaipro_retry_payload(base_payload, retry_attempt=1):
 
     # Always change text with a stronger invisible nonce.
     payload['input'] = _build_genaipro_nonce_input(payload.get('input'), attempt)
+
+    # Cycle through model IDs — the API deduplicates on (text, voice_id, model_id)
+    # so switching models reliably forces a new task even when invisible-char nonces
+    # are normalized away by the server.
+    payload['model_id'] = _GENAIPRO_FALLBACK_MODELS[(attempt - 1) % len(_GENAIPRO_FALLBACK_MODELS)]
+
+    # Toggle use_speaker_boost on alternating attempts for an additional dedupe dimension.
+    payload['use_speaker_boost'] = bool(attempt % 2)
 
     # Also slightly vary synthesis knobs so retries are unique even if input is normalized.
     sign = 1 if (attempt % 2) else -1
