@@ -807,6 +807,82 @@ def _find_task_in_genaipro_response(data, task_id):
     return None
 
 
+def _select_submission_task(tasks, expected_input=None, expected_voice_id=None):
+    """Select the best task candidate from a submission/list response."""
+    if not isinstance(tasks, list):
+        return None
+    candidates = [t for t in tasks if isinstance(t, dict)]
+    if not candidates:
+        return None
+
+    # Prefer exact input+voice match (for nonce re-submit flows)
+    if expected_input is not None:
+        exact = [t for t in candidates if t.get('input') == expected_input]
+        if expected_voice_id is not None:
+            exact_voice = [t for t in exact if t.get('voice_id') == expected_voice_id]
+            if exact_voice:
+                exact = exact_voice
+        if exact:
+            candidates = exact
+        else:
+            # Fallback: compare after removing zero-width chars.
+            def _norm(s):
+                if not isinstance(s, str):
+                    return ''
+                return s.replace('\u200b', '').replace('\u200c', '').replace('\u200d', '').replace('\ufeff', '').strip()
+            norm_expected = _norm(expected_input)
+            approx = [t for t in candidates if _norm(t.get('input')) == norm_expected]
+            if expected_voice_id is not None:
+                approx_voice = [t for t in approx if t.get('voice_id') == expected_voice_id]
+                if approx_voice:
+                    approx = approx_voice
+            if approx:
+                candidates = approx
+
+    # Prefer most recent task when list contains historical entries.
+    def _time_key(task):
+        return (
+            str(task.get('updated_at') or ''),
+            str(task.get('created_at') or ''),
+            str(task.get('id') or task.get('task_id') or '')
+        )
+
+    return max(candidates, key=_time_key)
+
+
+def _extract_submission_task_id(task_data, expected_input=None, expected_voice_id=None):
+    """Extract a task_id from GenAI Pro submit response across all known shapes."""
+    if isinstance(task_data, dict):
+        task_id = task_data.get('task_id') or task_data.get('id')
+        if task_id:
+            return task_id, task_data
+
+        if isinstance(task_data.get('data'), dict):
+            inner = task_data['data']
+            task_id = inner.get('task_id') or inner.get('id')
+            if task_id:
+                return task_id, inner
+
+        selected = _select_submission_task(
+            task_data.get('tasks'),
+            expected_input=expected_input,
+            expected_voice_id=expected_voice_id
+        )
+        if selected:
+            return selected.get('task_id') or selected.get('id'), selected
+
+    elif isinstance(task_data, list):
+        selected = _select_submission_task(
+            task_data,
+            expected_input=expected_input,
+            expected_voice_id=expected_voice_id
+        )
+        if selected:
+            return selected.get('task_id') or selected.get('id'), selected
+
+    return None, None
+
+
 def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=None, log=None):
     """
     Generate Text-to-Speech audio using GenAI Pro API.
@@ -944,15 +1020,13 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     log(f"[GenAI Pro ERROR] Direct audio download error: {dl_err}")
             return None
 
-        # GenAI Pro might return 'task_id' or 'id' field (or nested under 'data' or 'tasks' list)
-        task_id = task_data.get('task_id') or task_data.get('id')
-        if not task_id and isinstance(task_data.get('data'), dict):
-            inner = task_data['data']
-            task_id = inner.get('task_id') or inner.get('id')
-        # Handle list-style response: {'limit': N, 'page': N, 'tasks': [{'id': ..., ...}]}
+        # GenAI Pro might return direct id, nested id, or a paginated list of tasks.
+        task_id, selected_submission_task = _extract_submission_task_id(
+            task_data,
+            expected_input=text,
+            expected_voice_id=voice_id
+        )
         _submission_tasks = task_data['tasks'] if isinstance(task_data.get('tasks'), list) else []
-        if not task_id and _submission_tasks:
-            task_id = _submission_tasks[0].get('task_id') or _submission_tasks[0].get('id')
 
         if not task_id:
             if log:
@@ -963,8 +1037,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             log(f"[GenAI Pro] Task submitted with ID: {task_id}")
 
         # If the submission response already contains a completed task with an audio URL, download immediately
-        if _submission_tasks:
-            _sub = _submission_tasks[0]
+        if _submission_tasks and selected_submission_task:
+            _sub = selected_submission_task
             _sub_status = _sub.get('status', '').lower()
             _sub_result = (_sub.get('result') or _sub.get('audio_url') or
                            _sub.get('output_url') or _sub.get('file_url') or _sub.get('url') or '')
@@ -997,11 +1071,11 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     )
                     if nonce_resp.status_code == 200:
                         nonce_data = nonce_resp.json()
-                        nonce_id = nonce_data.get('task_id') or nonce_data.get('id')
-                        if not nonce_id and isinstance(nonce_data.get('data'), dict):
-                            nonce_id = nonce_data['data'].get('task_id') or nonce_data['data'].get('id')
-                        if not nonce_id and isinstance(nonce_data.get('tasks'), list) and nonce_data['tasks']:
-                            nonce_id = nonce_data['tasks'][0].get('task_id') or nonce_data['tasks'][0].get('id')
+                        nonce_id, _ = _extract_submission_task_id(
+                            nonce_data,
+                            expected_input=nonce_payload.get('input'),
+                            expected_voice_id=voice_id
+                        )
                         if nonce_id:
                             task_id = nonce_id
                             task_payload = nonce_payload
@@ -1165,11 +1239,11 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                         )
                         if retry_resp.status_code == 200:
                             retry_data = retry_resp.json()
-                            new_id = retry_data.get('task_id') or retry_data.get('id')
-                            if not new_id and isinstance(retry_data.get('data'), dict):
-                                new_id = retry_data['data'].get('task_id') or retry_data['data'].get('id')
-                            if not new_id and isinstance(retry_data.get('tasks'), list) and retry_data['tasks']:
-                                new_id = retry_data['tasks'][0].get('task_id') or retry_data['tasks'][0].get('id')
+                            new_id, _ = _extract_submission_task_id(
+                                retry_data,
+                                expected_input=nonce_payload.get('input'),
+                                expected_voice_id=voice_id
+                            )
                             if new_id:
                                 task_id = new_id
                                 # Update task_payload so any further re-submits keep the nonce
@@ -1295,14 +1369,11 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
         if log:
             log(f"[GenAI Pro Submit] Response ({response.status_code}): {str(task_data)[:400]}")
 
-        task_id = task_data.get('task_id') or task_data.get('id')
-        if not task_id and isinstance(task_data.get('data'), dict):
-            inner = task_data['data']
-            task_id = inner.get('task_id') or inner.get('id')
-        # Handle list-style response: {'limit': N, 'page': N, 'tasks': [{'id': ..., ...}]}
-        if not task_id and isinstance(task_data.get('tasks'), list) and task_data['tasks']:
-            first_task = task_data['tasks'][0]
-            task_id = first_task.get('task_id') or first_task.get('id')
+        task_id, _ = _extract_submission_task_id(
+            task_data,
+            expected_input=text,
+            expected_voice_id=voice_id
+        )
 
         if not task_id:
             if log:
