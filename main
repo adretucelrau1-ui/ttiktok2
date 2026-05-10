@@ -6141,7 +6141,7 @@ def queue_worker(jobs, q):
             for _idx in range(total):
                 if not voice_done_events[_idx].is_set():
                     voice_done_events[_idx].set()
-                    any_voice_ready.set()
+            any_voice_ready.set()
     
     # Start submitter in background — submissions happen while videos process
     submitter_thread = threading.Thread(target=_submitter)
