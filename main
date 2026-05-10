@@ -1039,7 +1039,9 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         
     except Exception as e:
         if log:
+            import traceback as _tb
             log(f"[GenAI Pro ERROR] Exception: {e}")
+            log(_tb.format_exc())
         return None
 
 
@@ -1135,7 +1137,9 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
 
     except Exception as e:
         if log:
+            import traceback as _tb
             log(f"[GenAI Pro Submit ERROR] {e}")
+            log(_tb.format_exc())
         return None, None
 
 
@@ -1266,7 +1270,9 @@ def _poll_and_download_genaipro(task_id, headers, output_path=None, log=None):
 
     except Exception as e:
         if log:
+            import traceback as _tb
             log(f"[GenAI Pro Poll ERROR] {e}")
+            log(_tb.format_exc())
         return None
 
 
@@ -6098,34 +6104,44 @@ def queue_worker(jobs, q):
     
     def _submitter():
         """Background thread: submit voices one by one, start completion immediately."""
-        for idx in range(total):
-            job = jobs[idx]
+        try:
+            for idx in range(total):
+                job = jobs[idx]
+                
+                if not job.get("use_ai_voice", False):
+                    # No AI voice — mark as immediately ready
+                    log(f"[QUEUE] Job {idx+1}/{total}: no AI voice — ready immediately")
+                    voice_done_events[idx].set()
+                    any_voice_ready.set()
+                    continue
+                
+                log(f"\n[QUEUE] 📤 Submitting voice {idx+1}/{total}...")
+                sub = _submit_voice_for_job(job, idx + 1, total, q)
+                
+                if sub is None:
+                    # Submission failed — mark as ready (will process without pre-gen voice)
+                    voice_done_events[idx].set()
+                    any_voice_ready.set()
+                else:
+                    # Start completion thread IMMEDIATELY (polls GenAI while we submit next job)
+                    t = threading.Thread(target=_completion_worker, args=(idx, sub))
+                    with completion_threads_lock:
+                        completion_threads.append(t)
+                    t.start()
+                    log(f"[QUEUE] ✓ Job {idx+1} completion thread started — moving to next")
             
-            if not job.get("use_ai_voice", False):
-                # No AI voice — mark as immediately ready
-                log(f"[QUEUE] Job {idx+1}/{total}: no AI voice — ready immediately")
-                voice_done_events[idx].set()
-                any_voice_ready.set()
-                continue
-            
-            log(f"\n[QUEUE] 📤 Submitting voice {idx+1}/{total}...")
-            sub = _submit_voice_for_job(job, idx + 1, total, q)
-            
-            if sub is None:
-                # Submission failed — mark as ready (will process without pre-gen voice)
-                voice_done_events[idx].set()
-                any_voice_ready.set()
-            else:
-                # Start completion thread IMMEDIATELY (polls GenAI while we submit next job)
-                t = threading.Thread(target=_completion_worker, args=(idx, sub))
-                with completion_threads_lock:
-                    completion_threads.append(t)
-                t.start()
-                log(f"[QUEUE] ✓ Job {idx+1} completion thread started — moving to next")
-        
-        log(f"\n[QUEUE] ═══ ALL {total} VOICES SUBMITTED ═══")
-        # Release Whisper model after all submissions to free GPU memory during voice waiting
-        _release_whisper_model(log=log)
+            log(f"\n[QUEUE] ═══ ALL {total} VOICES SUBMITTED ═══")
+            # Release Whisper model after all submissions to free GPU memory during voice waiting
+            _release_whisper_model(log=log)
+        except Exception as _sub_err:
+            import traceback as _tb
+            log(f"[QUEUE SUBMITTER] ❌ Unexpected error in submitter thread: {_sub_err}")
+            log(_tb.format_exc())
+            # Mark all remaining unfinished jobs as ready so the main thread doesn't hang
+            for _idx in range(total):
+                if not voice_done_events[_idx].is_set():
+                    voice_done_events[_idx].set()
+                    any_voice_ready.set()
     
     # Start submitter in background — submissions happen while videos process
     submitter_thread = threading.Thread(target=_submitter)
