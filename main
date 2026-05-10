@@ -883,6 +883,16 @@ def _extract_submission_task_id(task_data, expected_input=None, expected_voice_i
     return None, None
 
 
+def _build_genaipro_nonce_input(base_input, nonce_attempt=1):
+    """Build an invisible, progressively stronger nonce suffix for GenAI Pro dedupe bypass."""
+    if not isinstance(base_input, str):
+        base_input = '' if base_input is None else str(base_input)
+    n = max(1, int(nonce_attempt))
+    # Mix multiple zero-width code points so retries are distinct even if one is normalized away.
+    invisible_suffix = ('\u200B' * n) + ('\u2060' * n) + ('\u200C' if n % 2 else '\u200D')
+    return base_input.rstrip() + invisible_suffix
+
+
 def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=None, log=None):
     """
     Generate Text-to-Speech audio using GenAI Pro API.
@@ -964,6 +974,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
             'similarity': 0.75,
             'stability': 0.5
         }
+        nonce_retry_count = 0
+        max_nonce_retries = 6
         
         response = session.post(
             'https://genaipro.vn/api/v1/labs/task',
@@ -1062,7 +1074,8 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                 # The cached result URL is expired/broken — force a fresh task via nonce and let polling handle it
                 try:
                     nonce_payload = dict(task_payload)
-                    nonce_payload['input'] = task_payload['input'].rstrip() + '\u200B'
+                    nonce_retry_count += 1
+                    nonce_payload['input'] = _build_genaipro_nonce_input(task_payload.get('input'), nonce_retry_count)
                     nonce_resp = session.post(
                         'https://genaipro.vn/api/v1/labs/task',
                         headers=headers,
@@ -1077,6 +1090,10 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                             expected_voice_id=voice_id
                         )
                         if nonce_id:
+                            if str(nonce_id) == str(task_id):
+                                if log:
+                                    log(f"[GenAI Pro ERROR] Nonce re-submission returned the same task ID ({nonce_id}); aborting to avoid endless stale-loop")
+                                return None
                             task_id = nonce_id
                             task_payload = nonce_payload
                             if log:
@@ -1229,8 +1246,13 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                     if log:
                         log(f"[GenAI Pro] ⚠️ Result URL expired — re-submitting with nonce to bypass cache...")
                     try:
+                        if nonce_retry_count >= max_nonce_retries:
+                            if log:
+                                log(f"[GenAI Pro ERROR] Reached max nonce retries ({max_nonce_retries}) without a downloadable file")
+                            return None
                         nonce_payload = dict(task_payload)
-                        nonce_payload['input'] = task_payload['input'].rstrip() + '\u200B'
+                        nonce_retry_count += 1
+                        nonce_payload['input'] = _build_genaipro_nonce_input(task_payload.get('input'), nonce_retry_count)
                         retry_resp = session.post(
                             'https://genaipro.vn/api/v1/labs/task',
                             headers=headers,
@@ -1245,6 +1267,10 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
                                 expected_voice_id=voice_id
                             )
                             if new_id:
+                                if str(new_id) == str(task_id):
+                                    if log:
+                                        log(f"[GenAI Pro ERROR] Re-submission returned same task ID ({new_id}); stopping to avoid infinite retries")
+                                    return None
                                 task_id = new_id
                                 # Update task_payload so any further re-submits keep the nonce
                                 task_payload = nonce_payload
