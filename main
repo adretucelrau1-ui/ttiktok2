@@ -832,7 +832,12 @@ def generate_tts_with_genaipro(text, language='en', output_path=None, api_key=No
         
         if response.status_code != 200:
             if log:
-                log(f"[GenAI Pro ERROR] Task submission failed: {response.status_code} - {response.text}")
+                err_body = response.text[:300]
+                log(f"[GenAI Pro ERROR] Task submission failed: {response.status_code} - {err_body}")
+                if response.status_code == 401:
+                    log("[GenAI Pro ERROR] ❌ Authentication failed — your GenAI Pro JWT token has expired or is invalid.")
+                    log("[GenAI Pro ERROR] ➡️  Please log in again at https://genaipro.vn, copy your new JWT token,")
+                    log("[GenAI Pro ERROR]     and paste it in the 'TTS API Key' field, then click 'Save API Key'.")
             return None
         
         task_data = response.json()
@@ -1090,7 +1095,12 @@ def _submit_genaipro_task(text, language='en', api_key=None, log=None):
 
         if response.status_code != 200:
             if log:
-                log(f"[GenAI Pro Submit ERROR] {response.status_code} - {response.text}")
+                err_body = response.text[:300]
+                log(f"[GenAI Pro Submit ERROR] {response.status_code} - {err_body}")
+                if response.status_code == 401:
+                    log("[GenAI Pro Submit ERROR] ❌ Authentication failed — your GenAI Pro JWT token has expired or is invalid.")
+                    log("[GenAI Pro Submit ERROR] ➡️  Please log in again at https://genaipro.vn, copy your new JWT token,")
+                    log("[GenAI Pro Submit ERROR]     and paste it in the 'TTS API Key' field, then click 'Save API Key'.")
             return None, None
 
         task_data = response.json()
@@ -1456,7 +1466,9 @@ def generate_tts_audio(text, language='en', output_path=None, log=None):
     api_key = _get_genaipro_api_key()
     if not api_key:
         if log:
-            log("[TTS] ❌ No GenAI Pro API key found in tts_config.json")
+            config_path = os.path.join(os.path.dirname(__file__), "tts_config.json")
+            log(f"[TTS] ❌ No GenAI Pro API key found in: {config_path}")
+            log("[TTS] ➡️  Enter your JWT token in the 'TTS API Key' field and click 'Save API Key'.")
         return None
     
     if log:
@@ -8266,14 +8278,21 @@ class App:
                 messagebox.showwarning("No API Key", "Please enter an API key.")
                 return
             
-            # Save to config file
+            # Save to config file — read existing config first to preserve custom_voices and other data
             config_path = os.path.join(os.path.dirname(__file__), "tts_config.json")
-            config = {"api_key": api_key}
+            config = {}
+            try:
+                if os.path.exists(config_path):
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+            except Exception:
+                pass
+            config["api_key"] = api_key
             
             try:
                 with open(config_path, 'w') as f:
-                    json.dump(config, f)
-                messagebox.showinfo("API Key Saved", "Your API key has been saved successfully!")
+                    json.dump(config, f, indent=2)
+                messagebox.showinfo("API Key Saved", f"Your API key has been saved successfully!\n\nConfig: {config_path}")
             except Exception as e:
                 messagebox.showerror("Save Error", f"Failed to save API key: {e}")
         except Exception as e:
