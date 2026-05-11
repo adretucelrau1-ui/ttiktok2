@@ -7795,6 +7795,24 @@ class App:
         ttk.Spinbox(left_frame, from_=1, to=9999, textvariable=self.tt_dl_max_var, width=8).grid(row=row, column=1, sticky="w", padx=6)
         row += 1
 
+        ttk.Label(left_frame, text="Sortare videouri:").grid(row=row, column=0, sticky="w")
+        self.tt_dl_order_var = tk.StringVar(value="Cele mai noi")
+        tt_dl_order_cb = ttk.Combobox(left_frame, textvariable=self.tt_dl_order_var, width=22,
+                                      values=["Cele mai noi", "Cele mai vechi", "Populare"],
+                                      state="readonly")
+        tt_dl_order_cb.grid(row=row, column=1, columnspan=2, sticky="w", padx=6)
+        row += 1
+
+        ttk.Label(left_frame, text="Începe de la video URL:").grid(row=row, column=0, sticky="w")
+        self.tt_dl_from_url_var = tk.StringVar()
+        ttk.Entry(left_frame, textvariable=self.tt_dl_from_url_var).grid(row=row, column=1, columnspan=2, sticky="ew", padx=6)
+        row += 1
+
+        ttk.Label(left_frame, textvariable=tk.StringVar(
+            value="(opțional) Dacă ai mai descărcat, lipește link-ul ultimului video și descărcarea continuă de la următorul."
+        ), style='TLabel', foreground=self.TEXT_MUTED, wraplength=340).grid(row=row, column=0, columnspan=3, sticky="w", padx=6, pady=(0, 4))
+        row += 1
+
         tt_dl_btns = ttk.Frame(left_frame)
         try:
             tt_dl_btns.configure(style='TFrame')
@@ -10547,6 +10565,16 @@ class App:
 
         max_videos = self.tt_dl_max_var.get()
         start_num = self.tt_dl_start_var.get()
+        sort_order = self.tt_dl_order_var.get()
+        from_video_url = self.tt_dl_from_url_var.get().strip()
+
+        if sort_order == "Populare":
+            messagebox.showinfo(
+                "Sortare populare",
+                "TikTok nu expune public lista sortată după popularitate.\n"
+                "Folosește 'Cele mai noi' sau 'Cele mai vechi'.\n\n"
+                "Descărcarea va continua în ordinea implicită (cele mai noi)."
+            )
 
         self._tt_dl_stop = False
         self._tt_dl_set_ui(True)
@@ -10564,12 +10592,17 @@ class App:
 
                 # Collect video URLs first (playlist / user page)
                 self.root.after(0, lambda: self.tt_dl_status_var.set("Se colectează lista de videouri…"))
+
+                # For 'Oldest' or when a start-video URL is given we need the full list
+                need_full_list = (sort_order == "Cele mai vechi") or bool(from_video_url)
                 ydl_opts_list = {
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': True,
-                    'playlistend': max_videos,
                 }
+                if not need_full_list:
+                    ydl_opts_list['playlistend'] = max_videos
+
                 with yt_dlp.YoutubeDL(ydl_opts_list) as ydl:
                     info = ydl.extract_info(url, download=False)
 
@@ -10577,12 +10610,44 @@ class App:
                     self.root.after(0, lambda: self._tt_dl_finish("Nu s-au putut colecta videouri. Verifică URL-ul."))
                     return
 
-                entries = info.get('entries') or [info]
-                entries = [e for e in entries if e][:max_videos]
+                entries = [e for e in (info.get('entries') or [info]) if e]
+
+                if not entries:
+                    self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită."))
+                    return
+
+                # Apply sort order
+                if sort_order == "Cele mai vechi":
+                    entries = list(reversed(entries))
+
+                # Find start position from specific video URL
+                if from_video_url:
+                    # Extract the video ID from the given URL
+                    import re as _re
+                    m = _re.search(r'/video/(\d+)', from_video_url)
+                    target_id = m.group(1) if m else None
+                    start_idx = 0
+                    if target_id:
+                        for idx, e in enumerate(entries):
+                            entry_id = str(e.get('id', '') or e.get('url', ''))
+                            if target_id in entry_id:
+                                # Start from the video AFTER the found one
+                                start_idx = idx + 1
+                                break
+                    if start_idx >= len(entries):
+                        self.root.after(0, lambda: self._tt_dl_finish(
+                            "Videoul specificat a fost găsit ca ultimul din listă. Nu mai sunt videouri de descărcat."))
+                        return
+                    entries = entries[start_idx:]
+                    skipped_msg = f"Am sărit {start_idx} videouri. Descărc de la poziția {start_idx + 1}…"
+                    self.root.after(0, lambda m=skipped_msg: self.tt_dl_status_var.set(m))
+
+                # Limit to max_videos
+                entries = entries[:max_videos]
                 total = len(entries)
 
                 if total == 0:
-                    self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită."))
+                    self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită după filtrare."))
                     return
 
                 downloaded = 0
