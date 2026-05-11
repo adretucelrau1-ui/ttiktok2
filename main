@@ -10742,7 +10742,7 @@ class App:
                         'no_warnings': True,
                         'outtmpl': out_path,
                         # Prefer non-watermarked HD format; TikTok serves it as format_id "download_addr"
-                        'format': 'bestvideo[ext=mp4][vcodec!*=h265]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best',
+                        'format': 'bestvideo[ext=mp4][vcodec!*=h265]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4][acodec!=none]/best[acodec!=none]/best',
                         'merge_output_format': 'mp4',
                         # TikTok-specific: prefer download URL (no watermark) over play URL
                         'extractor_args': {'tiktok': {'webpage_download': True}},
