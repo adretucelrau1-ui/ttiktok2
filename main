@@ -7792,7 +7792,16 @@ class App:
 
         ttk.Label(left_frame, text="Max videos to download:").grid(row=row, column=0, sticky="w")
         self.tt_dl_max_var = tk.IntVar(value=10)
-        ttk.Spinbox(left_frame, from_=1, to=9999, textvariable=self.tt_dl_max_var, width=8).grid(row=row, column=1, sticky="w", padx=6)
+        self.tt_dl_max_spin = ttk.Spinbox(left_frame, from_=1, to=9999, textvariable=self.tt_dl_max_var, width=8)
+        self.tt_dl_max_spin.grid(row=row, column=1, sticky="w", padx=6)
+        self.tt_dl_all_var = tk.BooleanVar(value=False)
+        def _toggle_all_videos():
+            if self.tt_dl_all_var.get():
+                self.tt_dl_max_spin.config(state="disabled")
+            else:
+                self.tt_dl_max_spin.config(state="normal")
+        ttk.Checkbutton(left_frame, text="Descarcă TOATE", variable=self.tt_dl_all_var,
+                        command=_toggle_all_videos).grid(row=row, column=2, sticky="w", padx=6)
         row += 1
 
         ttk.Label(left_frame, text="Sortare videouri:").grid(row=row, column=0, sticky="w")
@@ -10564,6 +10573,7 @@ class App:
             url = f"https://www.tiktok.com/@{username}"
 
         max_videos = self.tt_dl_max_var.get()
+        download_all = self.tt_dl_all_var.get()
         start_num = self.tt_dl_start_var.get()
         sort_order = self.tt_dl_order_var.get()
         from_video_url = self.tt_dl_from_url_var.get().strip()
@@ -10588,7 +10598,7 @@ class App:
                 # For Popular or Oldest we need the full list to sort/reverse properly.
                 # yt-dlp ignores sort_type URL params and always returns newest-first from
                 # TikTok's API, so we handle ordering ourselves after collection.
-                need_full_list = (sort_order in ("Populare", "Cele mai vechi")) or bool(from_video_url)
+                need_full_list = download_all or (sort_order in ("Populare", "Cele mai vechi")) or bool(from_video_url)
                 ydl_opts_list = {
                     'quiet': True,
                     'no_warnings': True,
@@ -10639,8 +10649,9 @@ class App:
                     skipped_msg = f"Am sărit {start_idx} videouri. Descărc de la poziția {start_idx + 1}…"
                     self.root.after(0, lambda m=skipped_msg: self.tt_dl_status_var.set(m))
 
-                # Limit to max_videos
-                entries = entries[:max_videos]
+                # Limit to max_videos (unless "download all" is checked)
+                if not download_all:
+                    entries = entries[:max_videos]
                 total = len(entries)
 
                 if total == 0:
@@ -10648,6 +10659,7 @@ class App:
                     return
 
                 downloaded = 0
+                last_video_url = None
                 for i, entry in enumerate(entries):
                     if self._tt_dl_stop:
                         break
@@ -10681,10 +10693,32 @@ class App:
                         with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
                             ydl.download([video_url])
                         downloaded += 1
+                        # Track the webpage URL (not the raw stream URL) for the log file
+                        last_video_url = entry.get('webpage_url') or video_url
                     except Exception as dl_err:
                         err_msg = f"Eroare la {current_num}.mp4: {dl_err}"
                         self.root.after(0, lambda m=err_msg: self.tt_dl_status_var.set(m))
                         import time as _t; _t.sleep(0.5)
+
+                # --- Save progress log file ---
+                import re as _re2, datetime as _dt
+                _m = _re2.search(r'@([\w.]+)', url)
+                account_name = f"@{_m.group(1)}" if _m else url
+                safe_name = _re2.sub(r'[^\w.-]', '_', account_name.lstrip('@'))
+                log_path = os.path.join(folder, f"{safe_name}_progress.txt")
+                try:
+                    with open(log_path, 'w', encoding='utf-8') as _lf:
+                        _lf.write(f"Cont: {account_name}\n")
+                        _lf.write(f"URL cont: {url}\n")
+                        _lf.write(f"Categorie folosita: {sort_order}\n")
+                        _lf.write(f"Videouri descarcate in aceasta sesiune: {downloaded}\n")
+                        _lf.write(f"Numerotare: {start_num}–{start_num + downloaded - 1}\n")
+                        if last_video_url:
+                            _lf.write(f"\nUltimul video descarcat:\n{last_video_url}\n")
+                            _lf.write("\n(Lipeste URL-ul de mai sus in campul 'Incepe de la video URL' ca sa continui de unde ai ramas)\n")
+                        _lf.write(f"\nData: {_dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                except Exception:
+                    pass
 
                 if self._tt_dl_stop:
                     finish_msg = f"Oprit. Descărcat {downloaded} din {total} fișiere în {folder}."
