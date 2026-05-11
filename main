@@ -7765,6 +7765,60 @@ class App:
         ttk.Separator(left_frame).grid(row=row, column=0, columnspan=3, sticky="we", pady=8)
         row += 1
 
+        # ══════════ TIKTOK DOWNLOADER ══════════
+        ttk.Label(left_frame, text="📥  TikTok Downloader", style='SectionHeader.TLabel').grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 6))
+        row += 1
+
+        ttk.Label(left_frame, text="Account URL / @user:").grid(row=row, column=0, sticky="w")
+        self.tt_dl_url_var = tk.StringVar()
+        ttk.Entry(left_frame, textvariable=self.tt_dl_url_var).grid(row=row, column=1, columnspan=2, sticky="ew", padx=6)
+        row += 1
+
+        ttk.Label(left_frame, text="Output folder:").grid(row=row, column=0, sticky="w")
+        self.tt_dl_folder_var = tk.StringVar()
+        ttk.Entry(left_frame, textvariable=self.tt_dl_folder_var).grid(row=row, column=1, sticky="ew", padx=6)
+        ttk.Button(left_frame, text="Browse…", style='Bordered.TButton',
+                   command=lambda: self.tt_dl_folder_var.set(
+                       filedialog.askdirectory(title="Select output folder") or self.tt_dl_folder_var.get()
+                   )).grid(row=row, column=2, padx=6)
+        row += 1
+
+        ttk.Label(left_frame, text="Start numbering from:").grid(row=row, column=0, sticky="w")
+        self.tt_dl_start_var = tk.IntVar(value=1)
+        ttk.Spinbox(left_frame, from_=1, to=9999, textvariable=self.tt_dl_start_var, width=8).grid(row=row, column=1, sticky="w", padx=6)
+        ttk.Button(left_frame, text="🔍 Detect", style='Bordered.TButton',
+                   command=self._tt_dl_detect_start).grid(row=row, column=2, padx=6)
+        row += 1
+
+        ttk.Label(left_frame, text="Max videos to download:").grid(row=row, column=0, sticky="w")
+        self.tt_dl_max_var = tk.IntVar(value=10)
+        ttk.Spinbox(left_frame, from_=1, to=9999, textvariable=self.tt_dl_max_var, width=8).grid(row=row, column=1, sticky="w", padx=6)
+        row += 1
+
+        tt_dl_btns = ttk.Frame(left_frame)
+        try:
+            tt_dl_btns.configure(style='TFrame')
+            tt_dl_btns.config(bg=self.BG_DARK)
+        except Exception:
+            pass
+        tt_dl_btns.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.tt_dl_btn = ttk.Button(tt_dl_btns, text="⬇ Download", style='Accent.TButton', command=self._tt_dl_start)
+        self.tt_dl_btn.pack(side="left", padx=4)
+        self.tt_dl_cancel_btn = ttk.Button(tt_dl_btns, text="⏹ Cancel", style='Danger.TButton',
+                                           command=self._tt_dl_cancel, state="disabled")
+        self.tt_dl_cancel_btn.pack(side="left", padx=4)
+        row += 1
+
+        self.tt_dl_status_var = tk.StringVar(value="")
+        self.tt_dl_status_label = ttk.Label(left_frame, textvariable=self.tt_dl_status_var,
+                                            style='TLabel', foreground=self.TEXT_SECONDARY, wraplength=340)
+        self.tt_dl_status_label.grid(row=row, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self._tt_dl_stop = False
+        row += 1
+
+        ttk.Separator(left_frame).grid(row=row, column=0, columnspan=3, sticky="we", pady=8)
+        row += 1
+
         # ══════════ ACTIONS ══════════
         bottom_controls = ttk.Frame(left_frame)
         try:
@@ -10442,6 +10496,149 @@ class App:
                 pass
         except Exception as e:
             messagebox.showerror("Error updating job", str(e))
+
+    # ──────────────────────────────────────────────────────────────
+    # TikTok Downloader helpers
+    # ──────────────────────────────────────────────────────────────
+
+    def _tt_dl_detect_start(self):
+        """Scan the output folder for existing numbered .mp4 files and set start to max+1."""
+        folder = self.tt_dl_folder_var.get().strip()
+        if not folder or not os.path.isdir(folder):
+            messagebox.showwarning("No folder", "Selectează mai întâi un folder de output.")
+            return
+        import re
+        max_num = 0
+        for fname in os.listdir(folder):
+            m = re.match(r'^(\d+)\.(mp4|mov|avi|mkv)$', fname, re.IGNORECASE)
+            if m:
+                max_num = max(max_num, int(m.group(1)))
+        self.tt_dl_start_var.set(max_num + 1)
+        self.tt_dl_status_var.set(f"Am găsit {max_num} fișier(e). Numerotarea va începe de la {max_num + 1}.")
+
+    def _tt_dl_cancel(self):
+        self._tt_dl_stop = True
+        self.tt_dl_status_var.set("Se oprește…")
+
+    def _tt_dl_set_ui(self, running: bool):
+        state_btn = "disabled" if running else "normal"
+        state_cancel = "normal" if running else "disabled"
+        try:
+            self.tt_dl_btn.config(state=state_btn)
+            self.tt_dl_cancel_btn.config(state=state_cancel)
+        except Exception:
+            pass
+
+    def _tt_dl_start(self):
+        url = self.tt_dl_url_var.get().strip()
+        if not url:
+            messagebox.showwarning("URL lipsă", "Introdu URL-ul sau @username-ul contului TikTok.")
+            return
+        folder = self.tt_dl_folder_var.get().strip()
+        if not folder:
+            messagebox.showwarning("Folder lipsă", "Selectează un folder de output.")
+            return
+        os.makedirs(folder, exist_ok=True)
+
+        # Normalise: accept @user, user, or full URL
+        if not url.startswith("http"):
+            username = url.lstrip("@")
+            url = f"https://www.tiktok.com/@{username}"
+
+        max_videos = self.tt_dl_max_var.get()
+        start_num = self.tt_dl_start_var.get()
+
+        self._tt_dl_stop = False
+        self._tt_dl_set_ui(True)
+        self.tt_dl_status_var.set("Se pornește descărcarea…")
+
+        def _run():
+            try:
+                # Check yt-dlp availability
+                try:
+                    import yt_dlp
+                except ImportError:
+                    self.root.after(0, lambda: self._tt_dl_finish(
+                        "yt-dlp nu este instalat. Rulează: pip install yt-dlp și repornește aplicația."))
+                    return
+
+                # Collect video URLs first (playlist / user page)
+                self.root.after(0, lambda: self.tt_dl_status_var.set("Se colectează lista de videouri…"))
+                ydl_opts_list = {
+                    'quiet': True,
+                    'no_warnings': True,
+                    'extract_flat': True,
+                    'playlistend': max_videos,
+                }
+                with yt_dlp.YoutubeDL(ydl_opts_list) as ydl:
+                    info = ydl.extract_info(url, download=False)
+
+                if not info:
+                    self.root.after(0, lambda: self._tt_dl_finish("Nu s-au putut colecta videouri. Verifică URL-ul."))
+                    return
+
+                entries = info.get('entries') or [info]
+                entries = [e for e in entries if e][:max_videos]
+                total = len(entries)
+
+                if total == 0:
+                    self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită."))
+                    return
+
+                downloaded = 0
+                for i, entry in enumerate(entries):
+                    if self._tt_dl_stop:
+                        break
+                    current_num = start_num + i
+                    out_path = os.path.join(folder, f"{current_num}.mp4")
+                    video_url = entry.get('url') or entry.get('webpage_url') or entry.get('id')
+                    if not video_url:
+                        continue
+
+                    status_msg = f"Descarcă {i + 1}/{total} → {current_num}.mp4"
+                    self.root.after(0, lambda msg=status_msg: self.tt_dl_status_var.set(msg))
+
+                    # Download options: best quality, no watermark (via aweme_id trick / native formats)
+                    ydl_opts_dl = {
+                        'quiet': True,
+                        'no_warnings': True,
+                        'outtmpl': out_path,
+                        # Prefer non-watermarked HD format; TikTok serves it as format_id "download_addr"
+                        'format': 'bestvideo[ext=mp4][vcodec!*=h265]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4]/best',
+                        'merge_output_format': 'mp4',
+                        # TikTok-specific: prefer download URL (no watermark) over play URL
+                        'extractor_args': {'tiktok': {'webpage_download': True}},
+                        'overwrites': True,
+                        'retries': 3,
+                        'fragment_retries': 3,
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                        },
+                    }
+                    try:
+                        with yt_dlp.YoutubeDL(ydl_opts_dl) as ydl:
+                            ydl.download([video_url])
+                        downloaded += 1
+                    except Exception as dl_err:
+                        err_msg = f"Eroare la {current_num}.mp4: {dl_err}"
+                        self.root.after(0, lambda m=err_msg: self.tt_dl_status_var.set(m))
+                        import time as _t; _t.sleep(0.5)
+
+                if self._tt_dl_stop:
+                    finish_msg = f"Oprit. Descărcat {downloaded} din {total} fișiere în {folder}."
+                else:
+                    finish_msg = f"✅ Descărcat {downloaded}/{total} fișiere. Numerotare: {start_num}–{start_num + downloaded - 1} în {folder}"
+                self.root.after(0, lambda msg=finish_msg: self._tt_dl_finish(msg))
+
+            except Exception as e:
+                err = str(e)
+                self.root.after(0, lambda m=err: self._tt_dl_finish(f"❌ Eroare: {m}"))
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _tt_dl_finish(self, msg: str):
+        self.tt_dl_status_var.set(msg)
+        self._tt_dl_set_ui(False)
 
     def _on_stop(self):
         """Stop the current processing job."""
