@@ -5631,7 +5631,8 @@ def process_single_job(video_path, voice_path, music_path, requested_output_path
         # Enhanced detailed logging - now that we have all values
         log("═══════════════ PROCESSING JOB ═══════════════")
         log(f"VIDEO: {os.path.basename(video_path)} ({orig_w}x{orig_h}, {original_clip.duration:.1f}s)")
-        log(f"VOICE: {os.path.basename(voice_path)} (volume: {voice_gain:.2f}x, {_gain_to_display(voice_gain)})")
+        voice_label = os.path.basename(voice_path) if voice_path else "(AI voice only)"
+        log(f"VOICE: {voice_label} (volume: {voice_gain:.2f}x, {_gain_to_display(voice_gain)})")
         log(f"MUSIC: {os.path.basename(music_path)} (volume: {music_gain:.2f}x, {_gain_to_display(music_gain)})")
         
         # Font information
