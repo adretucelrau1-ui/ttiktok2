@@ -10602,10 +10602,18 @@ class App:
                 ydl_opts_list = {
                     'quiet': True,
                     'no_warnings': True,
-                    'extract_flat': True,
+                    'ignoreerrors': True,
                 }
-                if not need_full_list:
-                    ydl_opts_list['playlistend'] = max_videos
+                if download_all:
+                    # Do NOT use extract_flat when downloading all: TikTok's extractor
+                    # stops paginating after the first page (~20-30 videos) when flat
+                    # extraction is active. Without extract_flat, yt-dlp follows all
+                    # API cursor pages and collects the full playlist.
+                    pass
+                else:
+                    ydl_opts_list['extract_flat'] = True
+                    if not need_full_list:
+                        ydl_opts_list['playlistend'] = max_videos
 
                 with yt_dlp.YoutubeDL(ydl_opts_list) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -10614,7 +10622,20 @@ class App:
                     self.root.after(0, lambda: self._tt_dl_finish("Nu s-au putut colecta videouri. Verifică URL-ul."))
                     return
 
-                entries = [e for e in (info.get('entries') or [info]) if e]
+                raw_entries = info.get('entries') or [info]
+                # When download_all without extract_flat, entries may be fully-resolved
+                # info dicts or nested playlists; flatten one level and keep only video entries.
+                entries = []
+                for e in raw_entries:
+                    if not e:
+                        continue
+                    if e.get('_type') == 'playlist' or (e.get('entries') and not e.get('url')):
+                        # Nested playlist — flatten its children
+                        for sub in (e.get('entries') or []):
+                            if sub:
+                                entries.append(sub)
+                    else:
+                        entries.append(e)
 
                 if not entries:
                     self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită."))
@@ -10665,7 +10686,8 @@ class App:
                         break
                     current_num = start_num + i
                     out_path = os.path.join(folder, f"{current_num}.mp4")
-                    video_url = entry.get('url') or entry.get('webpage_url') or entry.get('id')
+                    # Prefer webpage_url (stable TikTok watch URL) over raw stream URL
+                    video_url = entry.get('webpage_url') or entry.get('url') or entry.get('id')
                     if not video_url:
                         continue
 
