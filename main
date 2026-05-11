@@ -10568,20 +10568,6 @@ class App:
         sort_order = self.tt_dl_order_var.get()
         from_video_url = self.tt_dl_from_url_var.get().strip()
 
-        # Apply TikTok sort_type URL parameter:
-        #   sort_type=0 → Cele mai noi (newest, default)
-        #   sort_type=1 → Cel mai vechi (oldest)
-        #   sort_type=2 → Popular
-        _sort_map = {"Cele mai noi": "0", "Cele mai vechi": "1", "Populare": "2"}
-        sort_type_val = _sort_map.get(sort_order, "0")
-        import urllib.parse as _urlparse
-        _parsed = _urlparse.urlparse(url)
-        _qs = _urlparse.parse_qs(_parsed.query)
-        _qs['sort_type'] = [sort_type_val]
-        url = _urlparse.urlunparse(_parsed._replace(
-            query=_urlparse.urlencode({k: v[0] for k, v in _qs.items()})
-        ))
-
         self._tt_dl_stop = False
         self._tt_dl_set_ui(True)
         self.tt_dl_status_var.set("Se pornește descărcarea…")
@@ -10599,15 +10585,14 @@ class App:
                 # Collect video URLs first (playlist / user page)
                 self.root.after(0, lambda: self.tt_dl_status_var.set("Se colectează lista de videouri…"))
 
-                # When a start-video URL is given we need the full list
-                need_full_list = bool(from_video_url)
+                # For Popular or Oldest we need the full list to sort/reverse properly.
+                # yt-dlp ignores sort_type URL params and always returns newest-first from
+                # TikTok's API, so we handle ordering ourselves after collection.
+                need_full_list = (sort_order in ("Populare", "Cele mai vechi")) or bool(from_video_url)
                 ydl_opts_list = {
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': True,
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    },
                 }
                 if not need_full_list:
                     ydl_opts_list['playlistend'] = max_videos
@@ -10624,6 +10609,13 @@ class App:
                 if not entries:
                     self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită."))
                     return
+
+                # Apply sort order client-side (yt-dlp always returns newest-first from TikTok API)
+                if sort_order == "Cele mai vechi":
+                    entries = list(reversed(entries))
+                elif sort_order == "Populare":
+                    # Sort descending by view_count; entries without a count go last
+                    entries = sorted(entries, key=lambda e: e.get('view_count') or 0, reverse=True)
 
                 # Find start position from specific video URL
                 if from_video_url:
