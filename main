@@ -750,6 +750,11 @@ GENAIPRO_MIN_SPEED = 0.7     # Minimum TTS speed accepted by the API
 GENAIPRO_MAX_SPEED = 1.2     # Maximum TTS speed accepted by the API
 GENAIPRO_MAX_WAIT_SECONDS = 600  # Max time to wait for a TTS task (10 minutes)
 
+# Number of voice jobs to submit to GenAI Pro simultaneously.
+# Higher = faster overall queue, but too many concurrent tasks may get rate-limited.
+# GenAI Pro doesn't publish a hard limit; 3 is a safe default.
+VOICE_SUBMISSION_CONCURRENCY = 3
+
 
 def _genaipro_session(requests_module):
     """Return a requests.Session that preserves the Authorization header across redirects.
@@ -6234,10 +6239,15 @@ def _prepare_voice_for_job(job, job_index, total_jobs, q):
                 pass
 
 
-def _submit_voice_for_job(job, job_index, total_jobs, q):
+def _submit_voice_for_job(job, job_index, total_jobs, q, release_whisper=True):
     """
     Phase 1 of non-blocking voice pipeline: Extract audio, transcribe, submit TTS.
     Does NOT wait for TTS completion — returns immediately after API submission.
+
+    Args:
+        release_whisper: If True (default), call _release_whisper_model() after transcription
+            to free GPU memory.  Set to False when running multiple concurrent submitters so
+            only the caller (which knows when ALL submitters are done) releases the model.
     
     Returns a submission dict with task info, or None if not needed/failed.
     The dict contains:
@@ -6307,7 +6317,10 @@ def _submit_voice_for_job(job, job_index, total_jobs, q):
         # Release Whisper model to free ~3GB GPU memory before translation.
         # Translation is CPU/network only and can take minutes if OpenAI rate-limits.
         # The model will be reloaded on next transcribe_captions() call if needed.
-        _release_whisper_model(log=log)
+        # When running multiple concurrent submitters, the caller handles the release
+        # once all submitters are done (release_whisper=False).
+        if release_whisper:
+            _release_whisper_model(log=log)
 
         # Now translate if needed (no GPU required)
         if translation_enabled and target_language and target_language != 'none' and caption_segments:
@@ -6611,11 +6624,11 @@ def queue_worker(jobs, q):
     
     # === INTERLEAVED NON-BLOCKING VOICE PIPELINE ===
     # Voice submissions and completions run concurrently:
-    #   - Submitter thread: transcribes + submits TTS for each job, starts completion
-    #     thread immediately after each submission (so GenAI processes job 1 while
-    #     Whisper transcribes job 2)
-    #   - Completion threads: poll GenAI + silence removal + re-transcribe (in parallel)
-    #   - Main thread: processes videos as soon as each voice becomes ready
+    #   - Up to VOICE_SUBMISSION_CONCURRENCY submitter threads run simultaneously:
+    #     each extracts audio, transcribes (serialised via Whisper lock) and POSTs
+    #     to GenAI Pro, then immediately starts a completion thread.
+    #   - Completion threads: poll GenAI + silence removal + re-transcribe (all parallel)
+    #   - Main thread: processes videos as soon as each voice becomes ready (any order)
     
     total = len(jobs)
     
@@ -6623,7 +6636,8 @@ def queue_worker(jobs, q):
     log("━"*60)
     log("[QUEUE] 🚀 INTERLEAVED NON-BLOCKING VOICE PIPELINE")
     log(f"[QUEUE] {total} jobs — submitting voices & processing videos concurrently")
-    log(f"[QUEUE] Each voice starts completion immediately after submission")
+    concurrency_preview = max(1, globals().get('VOICE_SUBMISSION_CONCURRENCY', 3))
+    log(f"[QUEUE] Concurrent voice submissions: {concurrency_preview} | Completions: parallel")
     log("━"*60)
     log("")
     
@@ -6646,52 +6660,79 @@ def queue_worker(jobs, q):
         finally:
             voice_done_events[idx].set()
             any_voice_ready.set()
-    
-    def _submitter():
-        """Background thread: submit voices one by one, start completion immediately."""
-        try:
-            for idx in range(total):
+
+    # ── Concurrent submission pool ──────────────────────────────────────────
+    # Up to VOICE_SUBMISSION_CONCURRENCY jobs are submitted to GenAI Pro at
+    # the same time.  Whisper transcription still serialises internally (GPU
+    # is not thread-safe), but audio extraction and TTS API POSTs overlap.
+    concurrency = max(1, globals().get('VOICE_SUBMISSION_CONCURRENCY', 3))
+    _submit_sem = threading.Semaphore(concurrency)
+    # Counts how many submitter threads are still running (used to know when
+    # the Whisper model can be released).
+    _active_submitters_lock = threading.Lock()
+    _active_submitters = [0]        # mutable int inside a list for closure
+
+    log(f"[QUEUE] ⚡ Concurrent voice submissions: {concurrency} at a time")
+
+    def _submit_one(idx):
+        """Thread: submit one voice job (bounded by _submit_sem semaphore)."""
+        with _submit_sem:
+            try:
                 job = jobs[idx]
-                
+
                 if not job.get("use_ai_voice", False):
-                    # No AI voice — mark as immediately ready
                     log(f"[QUEUE] Job {idx+1}/{total}: no AI voice — ready immediately")
                     voice_done_events[idx].set()
                     any_voice_ready.set()
-                    continue
-                
+                    return
+
                 log(f"\n[QUEUE] 📤 Submitting voice {idx+1}/{total}...")
-                sub = _submit_voice_for_job(job, idx + 1, total, q)
-                
+                # release_whisper=False: let the orchestrator release the model
+                # once ALL submitters have finished (avoids reloading between jobs).
+                sub = _submit_voice_for_job(job, idx + 1, total, q, release_whisper=False)
+
                 if sub is None:
-                    # Submission failed — mark as ready (will process without pre-gen voice)
                     voice_done_events[idx].set()
                     any_voice_ready.set()
                 else:
-                    # Start completion thread IMMEDIATELY (polls GenAI while we submit next job)
                     t = threading.Thread(target=_completion_worker, args=(idx, sub))
                     with completion_threads_lock:
                         completion_threads.append(t)
                     t.start()
-                    log(f"[QUEUE] ✓ Job {idx+1} completion thread started — moving to next")
-            
-            log(f"\n[QUEUE] ═══ ALL {total} VOICES SUBMITTED ═══")
-            # Release Whisper model after all submissions to free GPU memory during voice waiting
-            _release_whisper_model(log=log)
-        except Exception as _sub_err:
-            import traceback as _tb
-            log(f"[QUEUE SUBMITTER] ❌ Unexpected error in submitter thread: {_sub_err}")
-            log(_tb.format_exc())
-            # Mark all remaining unfinished jobs as ready so the main thread doesn't hang
-            for _idx in range(total):
-                if not voice_done_events[_idx].is_set():
-                    voice_done_events[_idx].set()
-            any_voice_ready.set()
-    
-    # Start submitter in background — submissions happen while videos process
-    submitter_thread = threading.Thread(target=_submitter)
+                    log(f"[QUEUE] ✓ Job {idx+1} completion thread started")
+
+            except Exception as _err:
+                import traceback as _tb
+                log(f"[QUEUE SUBMITTER {idx+1}] ❌ Error: {_err}")
+                log(_tb.format_exc())
+                if not voice_done_events[idx].is_set():
+                    voice_done_events[idx].set()
+                any_voice_ready.set()
+            finally:
+                with _active_submitters_lock:
+                    _active_submitters[0] -= 1
+                    remaining = _active_submitters[0]
+                # When the last submitter finishes, release Whisper model
+                if remaining == 0:
+                    log(f"\n[QUEUE] ═══ ALL {total} VOICES SUBMITTED ═══")
+                    _release_whisper_model(log=log)
+
+    # Launch all submitter threads (semaphore limits actual concurrency)
+    submit_threads = []
+    with _active_submitters_lock:
+        _active_submitters[0] = total
+    for _idx in range(total):
+        _t = threading.Thread(target=_submit_one, args=(_idx,))
+        submit_threads.append(_t)
+        _t.start()
+
+    # ── legacy alias so the join below still works ──────────────────────────
+    def _dummy_join():
+        for _t in submit_threads:
+            _t.join()
+    submitter_thread = threading.Thread(target=_dummy_join)
     submitter_thread.start()
-    
+
     # Process videos as each voice becomes ready (main thread)
     processed = [False] * total
     processed_count = 0
