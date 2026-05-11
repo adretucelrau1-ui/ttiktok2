@@ -7726,6 +7726,7 @@ class App:
             pass
         job_btns.grid(row=row, column=0, columnspan=3, sticky="w", pady=(6,0))
         ttk.Button(job_btns, text="➕ Add Job", style='Accent.TButton', command=self.add_job).pack(side="left", padx=4)
+        ttk.Button(job_btns, text="➕ Add Multiple", style='Accent.TButton', command=self.add_multiple_jobs).pack(side="left", padx=4)
         ttk.Button(job_btns, text="Remove Selected", style='Danger.TButton', command=self.remove_job).pack(side="left", padx=4)
         self.run_queue_btn = ttk.Button(job_btns, text="▶ Run Queue", style='Success.TButton', command=self.run_queue)
         self.run_queue_btn.pack(side="left", padx=4)
@@ -10004,6 +10005,92 @@ class App:
             self.job_listbox.insert('end', display)
         except Exception as e:
             messagebox.showerror("Error adding job", str(e))
+
+    def add_multiple_jobs(self):
+        """Open a multi-file dialog, then add one job per selected video using the current preset."""
+        try:
+            music = self.music_var.get().strip()
+            if not music:
+                messagebox.showwarning("Missing Music", "Please select a MUSIC file before adding multiple jobs.")
+                return
+            video_paths = filedialog.askopenfilenames(
+                title="Select multiple video files",
+                filetypes=[("Video files", "*.mp4 *.mov *.avi *.mkv *.webm *.flv"), ("All files", "*.*")]
+            )
+            if not video_paths:
+                return
+
+            # Snapshot all current preset settings once
+            voice = self.voice_var.get().strip()
+            try:
+                selected_font_name = getattr(self, 'selected_font', None)
+                selected_font_path = getattr(self, 'selected_font_path', None)
+                pref_font = get_validated_font(selected_font_name, selected_font_path)
+            except Exception:
+                pref_font = None
+
+            use_custom = self.use_custom_crop_var.get()
+
+            preset = {
+                "voice": voice,
+                "music": music,
+                "font": pref_font,
+                "custom_top_ratio": (self.top_percent_var.get() / 100.0) if use_custom else None,
+                "custom_bottom_ratio": (self.bottom_percent_var.get() / 100.0) if use_custom else None,
+                "mirror_video": self.mirror_video_var.get(),
+                "words_per_caption": self.words_per_caption_var.get(),
+                "use_4k": self.use_4k_var.get(),
+                "blur_radius": globals().get('STATIC_BG_BLUR_RADIUS', 25),
+                "bg_scale_extra": globals().get('BG_SCALE_EXTRA', 1.08),
+                "dim_factor": globals().get('DIM_FACTOR', 1.0),
+                "use_ai_voice": self.use_ai_voice_var.get(),
+                "translation_enabled": self.translation_enabled_var.get(),
+                "target_language": self.target_language_var.get() if hasattr(self, 'target_language_var') else 'none',
+                "tts_language": self.tts_language_var.get() if hasattr(self, 'tts_language_var') else 'en',
+                "silence_threshold_ms": self.silence_threshold_var.get(),
+                "caption_text_color": globals().get('CAPTION_TEXT_COLOR', (255, 255, 255, 255)),
+                "caption_stroke_color": globals().get('CAPTION_STROKE_COLOR', (0, 0, 0, 150)),
+                "caption_stroke_width": globals().get('CAPTION_STROKE_WIDTH', 3),
+                "caption_font_size": globals().get('CAPTION_FONT_SIZE', 56),
+                "caption_y_offset": globals().get('CAPTION_Y_OFFSET', 0),
+                "effect_sharpness": self.effect_sharpness_var.get(),
+                "effect_sharpness_intensity": self.effect_sharpness_intensity_var.get(),
+                "effect_saturation": self.effect_saturation_var.get(),
+                "effect_saturation_intensity": self.effect_saturation_intensity_var.get(),
+                "effect_contrast": self.effect_contrast_var.get(),
+                "effect_contrast_intensity": self.effect_contrast_intensity_var.get(),
+                "effect_brightness": self.effect_brightness_var.get(),
+                "effect_brightness_intensity": self.effect_brightness_intensity_var.get(),
+                "effect_vintage": self.effect_vintage_var.get(),
+                "effect_vintage_intensity": self.effect_vintage_intensity_var.get(),
+                "blur_overlay_enabled": self.blur_overlay_enabled_var.get(),
+                "blur_overlay_x": self.blur_overlay_x_var.get(),
+                "blur_overlay_y": self.blur_overlay_y_var.get(),
+                "blur_overlay_w": self.blur_overlay_w_var.get(),
+                "blur_overlay_h": self.blur_overlay_h_var.get(),
+                "blur_overlay_intensity": self.blur_overlay_intensity_var.get(),
+                "voice_gain": self.voice_gain_var.get(),
+                "music_gain": self.music_gain_var.get(),
+            }
+
+            added = 0
+            for video_path in video_paths:
+                video_stem = Path(video_path).stem
+                output = f"{video_stem}_tiktok.mp4"
+                job = dict(preset)
+                job["video"] = video_path
+                job["output"] = output
+                self.jobs.append(job)
+                info = self._format_job_info(job)
+                voice_name = Path(voice).name if voice else "(none)"
+                display = (f"{Path(video_path).name} | {voice_name} | {Path(music).name}"
+                           f" -> {output} (font={pref_font or 'default'}){info}")
+                self.job_listbox.insert('end', display)
+                added += 1
+
+            self.log_to_console(f"[Jobs] ✓ Added {added} job(s) with current preset.")
+        except Exception as e:
+            messagebox.showerror("Error adding jobs", str(e))
 
     def _refresh_job_listbox(self):
         self.job_listbox.delete(0, tk.END)
