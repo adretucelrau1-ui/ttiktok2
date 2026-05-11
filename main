@@ -7702,10 +7702,21 @@ class App:
         # ══════════ JOB QUEUE ══════════
         ttk.Label(left_frame, text="📋  Job Queue", style='SectionHeader.TLabel').grid(row=row, column=0, columnspan=3, sticky="w", pady=(0, 6))
         row += 1
-        self.job_listbox = tk.Listbox(left_frame, height=10, selectmode=tk.EXTENDED,
+        # Container so the scrollbar sits beside the listbox without disturbing the grid layout
+        job_lb_frame = tk.Frame(left_frame, bg=self.BG_SECONDARY)
+        job_lb_frame.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(4, 0))
+        job_lb_frame.columnconfigure(0, weight=1)
+        job_lb_frame.rowconfigure(0, weight=1)
+
+        job_lb_scroll = tk.Scrollbar(job_lb_frame, orient="vertical")
+        job_lb_scroll.grid(row=0, column=1, sticky="ns")
+
+        self.job_listbox = tk.Listbox(job_lb_frame, height=10, selectmode=tk.EXTENDED,
                                       bg=self.BG_SECONDARY, fg=self.TEXT_PRIMARY,
-                                      font=('Segoe UI', 9))
-        self.job_listbox.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(4,0))
+                                      font=('Segoe UI', 9),
+                                      yscrollcommand=job_lb_scroll.set)
+        self.job_listbox.grid(row=0, column=0, sticky="nsew")
+        job_lb_scroll.config(command=self.job_listbox.yview)
         try:
             self.job_listbox.config(selectbackground=self.SELECT_BG, selectforeground='#ffffff',
                                    highlightthickness=1, highlightbackground=self.BORDER_COLOR,
@@ -7713,6 +7724,20 @@ class App:
                                    bd=1, relief='flat')
         except Exception:
             pass
+        # Mouse-wheel scrolling (Windows/Mac/Linux)
+        def _jlb_scroll(event):
+            try:
+                if event.num == 4:
+                    self.job_listbox.yview_scroll(-1, "units")
+                elif event.num == 5:
+                    self.job_listbox.yview_scroll(1, "units")
+                else:
+                    self.job_listbox.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            except Exception:
+                pass
+        self.job_listbox.bind('<MouseWheel>', _jlb_scroll)
+        self.job_listbox.bind('<Button-4>', _jlb_scroll)
+        self.job_listbox.bind('<Button-5>', _jlb_scroll)
         # Add double-click binding to load job settings
         self.job_listbox.bind('<Double-Button-1>', self.on_job_double_click)
         left_frame.rowconfigure(row, weight=1)
@@ -7727,9 +7752,14 @@ class App:
         job_btns.grid(row=row, column=0, columnspan=3, sticky="w", pady=(6,0))
         ttk.Button(job_btns, text="➕ Add Job", style='Accent.TButton', command=self.add_job).pack(side="left", padx=4)
         ttk.Button(job_btns, text="➕ Add Multiple", style='Accent.TButton', command=self.add_multiple_jobs).pack(side="left", padx=4)
+        self.edit_job_btn = ttk.Button(job_btns, text="✏️ Edit Job", style='Info.TButton', command=self.on_edit_job)
+        self.edit_job_btn.pack(side="left", padx=4)
+        self.update_job_btn = ttk.Button(job_btns, text="💾 Update Job", style='Accent.TButton', command=self.update_job, state="disabled")
+        self.update_job_btn.pack(side="left", padx=4)
         ttk.Button(job_btns, text="Remove Selected", style='Danger.TButton', command=self.remove_job).pack(side="left", padx=4)
         self.run_queue_btn = ttk.Button(job_btns, text="▶ Run Queue", style='Success.TButton', command=self.run_queue)
         self.run_queue_btn.pack(side="left", padx=4)
+        self._editing_job_idx = None  # index of job currently being edited
         row += 1
 
         ttk.Separator(left_frame).grid(row=row, column=0, columnspan=3, sticky="we", pady=8)
@@ -10183,6 +10213,8 @@ class App:
             self.translation_enabled_var.set(job.get("translation_enabled", False))
             if hasattr(self, 'target_language_var'):
                 self.target_language_var.set(job.get("target_language", "none"))
+            if hasattr(self, 'tts_language_var'):
+                self.tts_language_var.set(job.get("tts_language", "en"))
             self.silence_threshold_var.set(job.get("silence_threshold_ms", 300))
             
             # Load video effects (CapCut-style)
@@ -10268,6 +10300,21 @@ class App:
                 except Exception:
                     pass
             
+            # Load audio gain settings
+            if hasattr(self, 'voice_gain_var'):
+                self.voice_gain_var.set(job.get("voice_gain", 1.0))
+            if hasattr(self, 'music_gain_var'):
+                self.music_gain_var.set(job.get("music_gain", 0.5))
+
+            # If this was a plain double-click (not via Edit Job button), reset edit mode
+            if event is not None:
+                self._editing_job_idx = None
+                try:
+                    self.update_job_btn.config(state="disabled")
+                    self.edit_job_btn.config(text="✏️ Edit Job")
+                except Exception:
+                    pass
+
             # Update video preview if video file exists
             video_path = job.get("video", "")
             if video_path and os.path.exists(video_path):
@@ -10288,6 +10335,113 @@ class App:
                 
         except Exception as e:
             messagebox.showerror("Error loading job", str(e))
+
+    def on_edit_job(self):
+        """Load selected job into UI and activate Update Job mode."""
+        try:
+            sel = self.job_listbox.curselection()
+            if not sel:
+                messagebox.showwarning("No selection", "Selectează un job din listă pentru a-l edita.")
+                return
+            job_idx = sel[0]
+            if job_idx >= len(self.jobs):
+                return
+            self._editing_job_idx = job_idx
+            # Re-use the existing double-click loader
+            self.on_job_double_click(None)
+            # Enable Update button, keep track visually
+            self.update_job_btn.config(state="normal")
+            self.edit_job_btn.config(text=f"✏️ Editing #{job_idx + 1}")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+    def update_job(self):
+        """Save current UI settings back into the job being edited."""
+        try:
+            if self._editing_job_idx is None:
+                messagebox.showwarning("Nothing to update", "Apasă mai întâi '✏️ Edit Job' pe un job selectat.")
+                return
+            idx = self._editing_job_idx
+            if idx >= len(self.jobs):
+                messagebox.showerror("Error", "Job-ul nu mai există în listă.")
+                self._editing_job_idx = None
+                self.update_job_btn.config(state="disabled")
+                self.edit_job_btn.config(text="✏️ Edit Job")
+                return
+
+            video = self.video_var.get().strip()
+            voice = self.voice_var.get().strip()
+            music = self.music_var.get().strip()
+            output = self.output_var.get().strip() or "final_tiktok.mp4"
+            if not video or not music:
+                messagebox.showwarning("Missing fields", "VIDEO și MUSIC sunt obligatorii.")
+                return
+
+            try:
+                selected_font_name = getattr(self, 'selected_font', None)
+                selected_font_path = getattr(self, 'selected_font_path', None)
+                pref_font = get_validated_font(selected_font_name, selected_font_path)
+            except Exception:
+                pref_font = self.jobs[idx].get("font")
+
+            job = {
+                "video": video,
+                "voice": voice,
+                "music": music,
+                "output": output,
+                "font": pref_font,
+                "custom_top_ratio": (self.top_percent_var.get() / 100.0) if self.use_custom_crop_var.get() else None,
+                "custom_bottom_ratio": (self.bottom_percent_var.get() / 100.0) if self.use_custom_crop_var.get() else None,
+                "mirror_video": self.mirror_video_var.get(),
+                "words_per_caption": self.words_per_caption_var.get(),
+                "use_4k": self.use_4k_var.get(),
+                "blur_radius": globals().get('STATIC_BG_BLUR_RADIUS', 25),
+                "bg_scale_extra": globals().get('BG_SCALE_EXTRA', 1.08),
+                "dim_factor": globals().get('DIM_FACTOR', 1.0),
+                "use_ai_voice": self.use_ai_voice_var.get(),
+                "translation_enabled": self.translation_enabled_var.get(),
+                "target_language": self.target_language_var.get() if hasattr(self, 'target_language_var') else 'none',
+                "tts_language": self.tts_language_var.get() if hasattr(self, 'tts_language_var') else 'en',
+                "silence_threshold_ms": self.silence_threshold_var.get(),
+                "caption_text_color": globals().get('CAPTION_TEXT_COLOR', (255, 255, 255, 255)),
+                "caption_stroke_color": globals().get('CAPTION_STROKE_COLOR', (0, 0, 0, 150)),
+                "caption_stroke_width": globals().get('CAPTION_STROKE_WIDTH', 3),
+                "caption_font_size": globals().get('CAPTION_FONT_SIZE', 56),
+                "caption_y_offset": globals().get('CAPTION_Y_OFFSET', 0),
+                "effect_sharpness": self.effect_sharpness_var.get() if hasattr(self, 'effect_sharpness_var') else False,
+                "effect_sharpness_intensity": self.effect_sharpness_intensity_var.get() if hasattr(self, 'effect_sharpness_intensity_var') else 1.5,
+                "effect_saturation": self.effect_saturation_var.get() if hasattr(self, 'effect_saturation_var') else False,
+                "effect_saturation_intensity": self.effect_saturation_intensity_var.get() if hasattr(self, 'effect_saturation_intensity_var') else 1.3,
+                "effect_contrast": self.effect_contrast_var.get() if hasattr(self, 'effect_contrast_var') else False,
+                "effect_contrast_intensity": self.effect_contrast_intensity_var.get() if hasattr(self, 'effect_contrast_intensity_var') else 1.2,
+                "effect_brightness": self.effect_brightness_var.get() if hasattr(self, 'effect_brightness_var') else False,
+                "effect_brightness_intensity": self.effect_brightness_intensity_var.get() if hasattr(self, 'effect_brightness_intensity_var') else 1.15,
+                "effect_vintage": self.effect_vintage_var.get() if hasattr(self, 'effect_vintage_var') else False,
+                "effect_vintage_intensity": self.effect_vintage_intensity_var.get() if hasattr(self, 'effect_vintage_intensity_var') else 0.3,
+                "blur_overlay_enabled": self.blur_overlay_enabled_var.get() if hasattr(self, 'blur_overlay_enabled_var') else False,
+                "blur_overlay_x": self.blur_overlay_x_var.get() if hasattr(self, 'blur_overlay_x_var') else 10.0,
+                "blur_overlay_y": self.blur_overlay_y_var.get() if hasattr(self, 'blur_overlay_y_var') else 10.0,
+                "blur_overlay_w": self.blur_overlay_w_var.get() if hasattr(self, 'blur_overlay_w_var') else 20.0,
+                "blur_overlay_h": self.blur_overlay_h_var.get() if hasattr(self, 'blur_overlay_h_var') else 15.0,
+                "blur_overlay_intensity": self.blur_overlay_intensity_var.get() if hasattr(self, 'blur_overlay_intensity_var') else 20,
+                "voice_gain": self.voice_gain_var.get(),
+                "music_gain": self.music_gain_var.get(),
+            }
+            self.jobs[idx] = job
+            self._refresh_job_listbox()
+            # Reset edit mode
+            self._editing_job_idx = None
+            self.update_job_btn.config(state="disabled")
+            self.edit_job_btn.config(text="✏️ Edit Job")
+            try:
+                self.log_widget.config(state='normal')
+                self.log_widget.insert('end', f"\n[UPDATE] Job #{idx + 1} actualizat cu succes.\n")
+                self.log_widget.see('end')
+                self.log_widget.config(state='disabled')
+            except Exception:
+                pass
+        except Exception as e:
+            messagebox.showerror("Error updating job", str(e))
 
     def _on_stop(self):
         """Stop the current processing job."""
