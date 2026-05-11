@@ -7973,6 +7973,13 @@ class App:
         self.mini_canvas.bind("<ButtonPress-1>", self._mini_on_mouse_down)
         self.mini_canvas.bind("<B1-Motion>", self._mini_on_mouse_move)
         self.mini_canvas.bind("<ButtonRelease-1>", self._mini_on_mouse_up)
+        # Blur box drag on TikTok mini-preview
+        self.tiktok_preview_canvas.bind("<ButtonPress-1>", self._tiktok_blur_on_mouse_down)
+        self.tiktok_preview_canvas.bind("<B1-Motion>", self._tiktok_blur_on_mouse_move)
+        self.tiktok_preview_canvas.bind("<ButtonRelease-1>", self._tiktok_blur_on_mouse_up)
+        self._tiktok_blur_dragging = False
+        self._tiktok_blur_drag_start_y = None
+        self._tiktok_blur_drag_start_val = None
 
         self.mini_base_img = None
         self.mini_scale = 1.0
@@ -11019,17 +11026,56 @@ class App:
             except Exception as cap_err:
                 print(f"[TIKTOK-PREVIEW] Caption overlay skipped: {cap_err}")
             
+            # Apply blur overlay on the full-resolution canvas before scaling
+            try:
+                if hasattr(self, 'blur_overlay_enabled_var') and self.blur_overlay_enabled_var.get():
+                    blur_ov_settings = {
+                        'blur_overlay_enabled': True,
+                        'blur_overlay_x': self.blur_overlay_x_var.get(),
+                        'blur_overlay_y': self.blur_overlay_y_var.get(),
+                        'blur_overlay_w': self.blur_overlay_w_var.get(),
+                        'blur_overlay_h': self.blur_overlay_h_var.get(),
+                        'blur_overlay_intensity': self.blur_overlay_intensity_var.get(),
+                    }
+                    canvas = apply_blur_overlay_to_preview(canvas, blur_ov_settings)
+            except Exception:
+                pass
+
             # Scale down to preview size (180x320)
             preview_canvas = canvas.resize((180, 320), Image.Resampling.LANCZOS)
-            
+
+            # Capture blur box coords for the overlay rectangle (in preview pixels)
+            blur_rect_coords = None
+            try:
+                if hasattr(self, 'blur_overlay_enabled_var') and self.blur_overlay_enabled_var.get():
+                    bx = self.blur_overlay_x_var.get() / 100.0
+                    by = self.blur_overlay_y_var.get() / 100.0
+                    bw = self.blur_overlay_w_var.get() / 100.0
+                    bh = self.blur_overlay_h_var.get() / 100.0
+                    blur_rect_coords = (bx * 180, by * 320, (bx + bw) * 180, (by + bh) * 320)
+            except Exception:
+                pass
+
             # Display in TikTok preview canvas — must run on main thread.
             # Use root.after(0, ...) so this is safe from both main and worker threads.
             photo = ImageTk.PhotoImage(preview_canvas)
-            def _apply_preview(photo_image=photo):
+            def _apply_preview(photo_image=photo, brc=blur_rect_coords):
                 try:
                     self.tiktok_preview_canvas.delete("all")
                     self.tiktok_preview_canvas.create_image(90, 160, image=photo_image)
                     self.tiktok_preview_image_ref = photo_image  # Keep reference
+                    # Draw draggable blur box outline
+                    if brc is not None:
+                        x1, y1, x2, y2 = brc
+                        self.tiktok_preview_canvas.create_rectangle(
+                            x1, y1, x2, y2,
+                            outline="#00CFFF", width=2, dash=(5, 3), tags="blur_box"
+                        )
+                        self.tiktok_preview_canvas.create_text(
+                            (x1 + x2) / 2, y1 - 6,
+                            text="⇕ drag", fill="#00CFFF", font=("Arial", 8),
+                            anchor="s", tags="blur_box_label"
+                        )
                 except Exception:
                     pass
             self.root.after(0, _apply_preview)
@@ -11146,6 +11192,43 @@ class App:
 
     def _mini_on_mouse_up(self, event):
         self.dragging = None
+
+    def _tiktok_blur_on_mouse_down(self, event):
+        """Start dragging the blur box up/down in the TikTok mini-preview."""
+        if not getattr(self, 'blur_overlay_enabled_var', None):
+            return
+        if not self.blur_overlay_enabled_var.get():
+            return
+        # Check if click is inside the blur box (with some tolerance)
+        by = self.blur_overlay_y_var.get() / 100.0  # fraction
+        bh = self.blur_overlay_h_var.get() / 100.0
+        bx = self.blur_overlay_x_var.get() / 100.0
+        bw = self.blur_overlay_w_var.get() / 100.0
+        x1 = bx * 180; x2 = (bx + bw) * 180
+        y1 = by * 320; y2 = (by + bh) * 320
+        tolerance = 12
+        ex, ey = event.x, event.y
+        if (x1 - tolerance <= ex <= x2 + tolerance) and (y1 - tolerance <= ey <= y2 + tolerance):
+            self._tiktok_blur_dragging = True
+            self._tiktok_blur_drag_start_y = ey
+            self._tiktok_blur_drag_start_val = self.blur_overlay_y_var.get()
+
+    def _tiktok_blur_on_mouse_move(self, event):
+        """Move the blur box up/down by dragging in the TikTok mini-preview."""
+        if not self._tiktok_blur_dragging:
+            return
+        delta_px = event.y - self._tiktok_blur_drag_start_y
+        delta_pct = (delta_px / 320.0) * 100.0
+        new_y = self._tiktok_blur_drag_start_val + delta_pct
+        bh = self.blur_overlay_h_var.get()
+        new_y = max(0.0, min(100.0 - bh, new_y))
+        self.blur_overlay_y_var.set(round(new_y, 1))
+        # Refresh TikTok preview (debounced via existing async method)
+        self._refresh_tiktok_preview_async()
+
+    def _tiktok_blur_on_mouse_up(self, event):
+        """End blur box drag."""
+        self._tiktok_blur_dragging = False
 
     def on_save_crop(self):
         top = float(self.top_percent_var.get())
