@@ -10568,13 +10568,19 @@ class App:
         sort_order = self.tt_dl_order_var.get()
         from_video_url = self.tt_dl_from_url_var.get().strip()
 
-        if sort_order == "Populare":
-            messagebox.showinfo(
-                "Sortare populare",
-                "TikTok nu expune public lista sortată după popularitate.\n"
-                "Folosește 'Cele mai noi' sau 'Cele mai vechi'.\n\n"
-                "Descărcarea va continua în ordinea implicită (cele mai noi)."
-            )
+        # Apply TikTok sort_type URL parameter:
+        #   sort_type=0 → Cele mai noi (newest, default)
+        #   sort_type=1 → Cel mai vechi (oldest)
+        #   sort_type=2 → Popular
+        _sort_map = {"Cele mai noi": "0", "Cele mai vechi": "1", "Populare": "2"}
+        sort_type_val = _sort_map.get(sort_order, "0")
+        import urllib.parse as _urlparse
+        _parsed = _urlparse.urlparse(url)
+        _qs = _urlparse.parse_qs(_parsed.query)
+        _qs['sort_type'] = [sort_type_val]
+        url = _urlparse.urlunparse(_parsed._replace(
+            query=_urlparse.urlencode({k: v[0] for k, v in _qs.items()})
+        ))
 
         self._tt_dl_stop = False
         self._tt_dl_set_ui(True)
@@ -10593,12 +10599,15 @@ class App:
                 # Collect video URLs first (playlist / user page)
                 self.root.after(0, lambda: self.tt_dl_status_var.set("Se colectează lista de videouri…"))
 
-                # For 'Oldest' or when a start-video URL is given we need the full list
-                need_full_list = (sort_order == "Cele mai vechi") or bool(from_video_url)
+                # When a start-video URL is given we need the full list
+                need_full_list = bool(from_video_url)
                 ydl_opts_list = {
                     'quiet': True,
                     'no_warnings': True,
                     'extract_flat': True,
+                    'http_headers': {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    },
                 }
                 if not need_full_list:
                     ydl_opts_list['playlistend'] = max_videos
@@ -10615,10 +10624,6 @@ class App:
                 if not entries:
                     self.root.after(0, lambda: self._tt_dl_finish("Nicio înregistrare găsită."))
                     return
-
-                # Apply sort order
-                if sort_order == "Cele mai vechi":
-                    entries = list(reversed(entries))
 
                 # Find start position from specific video URL
                 if from_video_url:
