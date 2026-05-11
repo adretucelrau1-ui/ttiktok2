@@ -10741,8 +10741,10 @@ class App:
                         'quiet': True,
                         'no_warnings': True,
                         'outtmpl': out_path,
-                        # Prefer non-watermarked HD format; TikTok serves it as format_id "download_addr"
-                        'format': 'bestvideo[ext=mp4][vcodec!*=h265]+bestaudio[ext=m4a]/bestvideo[ext=mp4]+bestaudio/best[ext=mp4][acodec!=none]/best[acodec!=none]/best',
+                        # TikTok serves combined (pre-merged) audio+video streams; using bestvideo+bestaudio
+                        # selects video-only streams and requires ffmpeg merging which often silently drops audio.
+                        # Use 'b' (best combined) filtered by acodec!=none to guarantee audio is present.
+                        'format': 'b[ext=mp4][vcodec!*=h265][acodec!=none]/b[ext=mp4][acodec!=none]/b[acodec!=none]/b',
                         'merge_output_format': 'mp4',
                         # TikTok-specific: prefer download URL (no watermark) over play URL
                         'extractor_args': {'tiktok': {'webpage_download': True}},
