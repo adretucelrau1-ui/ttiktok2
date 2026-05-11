@@ -8719,6 +8719,45 @@ class App:
             messagebox.showerror("Connection Error",
                 f"Could not connect to OpenAI API:\n{e}")
 
+    def _check_genaipro_api(self):
+        """Silently verify the GenAI Pro API key on startup by calling GET /v1/labs/task?limit=1.
+        Runs in a background thread so the UI is never blocked."""
+        import threading
+
+        def _worker():
+            try:
+                api_key = _get_genaipro_api_key()
+                if not api_key:
+                    return  # No key configured — nothing to check
+                if not REQUESTS_AVAILABLE:
+                    self.root.after(0, lambda: self.log_to_console(
+                        "[GenAI Pro] ⚠ 'requests' library not available — cannot verify API key"))
+                    return
+                import requests as _requests
+                session = _genaipro_session(_requests)
+                response = session.get(
+                    f'{GENAIPRO_API_BASE}/v1/labs/task?limit=1',
+                    headers={
+                        'Authorization': f'Bearer {api_key}',
+                        'Content-Type': 'application/json',
+                    },
+                    timeout=15,
+                )
+                if response.status_code == 200:
+                    self.root.after(0, lambda: self.log_to_console(
+                        "[GenAI Pro] ✓ API key is VALID — voice generation is ready"))
+                elif response.status_code == 401:
+                    self.root.after(0, lambda: self.log_to_console(
+                        "[GenAI Pro] ✗ API key is INVALID or expired — please update tts_config.json"))
+                else:
+                    self.root.after(0, lambda: self.log_to_console(
+                        f"[GenAI Pro] ⚠ API check returned HTTP {response.status_code} — key may still work"))
+            except Exception as e:
+                self.root.after(0, lambda: self.log_to_console(
+                    f"[GenAI Pro] ⚠ Could not reach API on startup: {e}"))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _apply_translation_prompt(self):
         """Apply the custom translation prompt from the GUI entry field."""
         try:
@@ -11582,6 +11621,9 @@ def main():
     
     # Catch any remaining Scale/Combobox/Spinbox widgets not explicitly registered
     root.after(200, app._setup_scroll_protection)
+    
+    # Verify GenAI Pro API key on startup (runs in background thread, logs result)
+    root.after(500, app._check_genaipro_api)
     
     root.mainloop()
 
