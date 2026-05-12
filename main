@@ -7774,7 +7774,7 @@ class App:
 
         self.blur_overlay_enabled_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(left_frame, text="Enable Blur Overlay", variable=self.blur_overlay_enabled_var,
-                       command=self._mini_update_worker_async).grid(row=row, column=0, columnspan=2, sticky="w")
+                       command=self._update_blur_preview_fast).grid(row=row, column=0, columnspan=2, sticky="w")
         ttk.Label(left_frame, text="🔲").grid(row=row, column=2, sticky="w")
         row += 1
 
@@ -7783,7 +7783,7 @@ class App:
         self.blur_overlay_x_var = tk.DoubleVar(value=10.0)
         self.blur_x_scale = tk.Scale(left_frame, from_=0, to=100, resolution=0.5, orient='horizontal',
                                 length=120, showvalue=0, variable=self.blur_overlay_x_var,
-                                command=lambda v: self._mini_update_worker_async())
+                                command=lambda v: self._update_blur_preview_fast())
         self.blur_x_scale.grid(row=row, column=1, padx=(6,0))
         self.blur_overlay_x_label = ttk.Label(left_frame, text=f"{self.blur_overlay_x_var.get():.1f}%")
         self.blur_overlay_x_label.grid(row=row, column=2, sticky='w', padx=(4,0))
@@ -7796,7 +7796,7 @@ class App:
         self.blur_overlay_y_var = tk.DoubleVar(value=10.0)
         self.blur_y_scale = tk.Scale(left_frame, from_=0, to=100, resolution=0.5, orient='horizontal',
                                 length=120, showvalue=0, variable=self.blur_overlay_y_var,
-                                command=lambda v: self._mini_update_worker_async())
+                                command=lambda v: self._update_blur_preview_fast())
         self.blur_y_scale.grid(row=row, column=1, padx=(6,0))
         self.blur_overlay_y_label = ttk.Label(left_frame, text=f"{self.blur_overlay_y_var.get():.1f}%")
         self.blur_overlay_y_label.grid(row=row, column=2, sticky='w', padx=(4,0))
@@ -7809,7 +7809,7 @@ class App:
         self.blur_overlay_w_var = tk.DoubleVar(value=20.0)
         self.blur_w_scale = tk.Scale(left_frame, from_=1, to=100, resolution=0.5, orient='horizontal',
                                 length=120, showvalue=0, variable=self.blur_overlay_w_var,
-                                command=lambda v: self._mini_update_worker_async())
+                                command=lambda v: self._update_blur_preview_fast())
         self.blur_w_scale.grid(row=row, column=1, padx=(6,0))
         self.blur_overlay_w_label = ttk.Label(left_frame, text=f"{self.blur_overlay_w_var.get():.1f}%")
         self.blur_overlay_w_label.grid(row=row, column=2, sticky='w', padx=(4,0))
@@ -7822,7 +7822,7 @@ class App:
         self.blur_overlay_h_var = tk.DoubleVar(value=15.0)
         self.blur_h_scale = tk.Scale(left_frame, from_=1, to=100, resolution=0.5, orient='horizontal',
                                 length=120, showvalue=0, variable=self.blur_overlay_h_var,
-                                command=lambda v: self._mini_update_worker_async())
+                                command=lambda v: self._update_blur_preview_fast())
         self.blur_h_scale.grid(row=row, column=1, padx=(6,0))
         self.blur_overlay_h_label = ttk.Label(left_frame, text=f"{self.blur_overlay_h_var.get():.1f}%")
         self.blur_overlay_h_label.grid(row=row, column=2, sticky='w', padx=(4,0))
@@ -7835,7 +7835,7 @@ class App:
         self.blur_overlay_intensity_var = tk.IntVar(value=20)
         self.blur_intensity_scale = tk.Scale(left_frame, from_=2, to=80, resolution=1, orient='horizontal',
                                         length=120, showvalue=0, variable=self.blur_overlay_intensity_var,
-                                        command=lambda v: self._mini_update_worker_async())
+                                        command=lambda v: self._update_blur_preview_fast())
         self.blur_intensity_scale.grid(row=row, column=1, padx=(6,0))
         self.blur_overlay_intensity_label = ttk.Label(left_frame, text=f"{self.blur_overlay_intensity_var.get()}")
         self.blur_overlay_intensity_label.grid(row=row, column=2, sticky='w', padx=(4,0))
@@ -11450,6 +11450,9 @@ class App:
                     effect_settings.get('effect_vintage', False)]):
                 img = apply_video_effects(img, effect_settings)
             
+            # Save pre-blur image so blur sliders can update instantly without re-extracting
+            self.mini_pre_blur_img = img
+
             # Apply blur overlay to preview (real-time visualization)
             if effect_settings.get('blur_overlay_enabled', False):
                 img = apply_blur_overlay_to_preview(img, effect_settings)
@@ -11470,6 +11473,37 @@ class App:
         except Exception as e:
             self.root.after(0, lambda: self._set_mini_canvas_placeholder("Preview error"))
             self.q.put(f"Mini-preview error: {e}")
+
+    def _update_blur_preview_fast(self):
+        """Quickly redraw the blur overlay on the cached pre-blur frame.
+
+        Called by blur overlay sliders so the preview and cyan indicator update
+        immediately without re-extracting the video frame from disk.
+        """
+        base = getattr(self, 'mini_pre_blur_img', None)
+        if base is None:
+            # No cached frame yet — fall back to full async update
+            self._mini_update_worker_async()
+            return
+        # Run PIL work in a background thread to keep the UI responsive
+        if getattr(self, '_blur_fast_thread', None) and self._blur_fast_thread.is_alive():
+            return
+        def _do():
+            try:
+                effect_settings = self._get_current_effect_settings()
+                img = base.copy()
+                if effect_settings.get('blur_overlay_enabled', False):
+                    img = apply_blur_overlay_to_preview(img, effect_settings)
+                top_pct = float(self.top_percent_var.get()) / 100.0
+                bottom_pct = float(self.bottom_percent_var.get()) / 100.0
+                composed = overlay_crop_on_image(img, top_pct, bottom_pct)
+                self.mini_base_img = img
+                self.root.after(0, lambda: self._redraw_mini_canvas_with_caption_indicator(
+                    composed, top_pct, bottom_pct))
+            except Exception:
+                pass
+        self._blur_fast_thread = threading.Thread(target=_do, daemon=True)
+        self._blur_fast_thread.start()
 
     def _start_mini_persistent_worker(self):
         # Start a background thread that listens for slider requests and updates preview in-place.
@@ -11568,6 +11602,9 @@ class App:
                             effect_settings.get('effect_vintage', False)]):
                         img = apply_video_effects(img, effect_settings)
                     
+                    # Save pre-blur image so blur sliders can update instantly
+                    self.mini_pre_blur_img = img
+
                     # Apply blur overlay to preview (real-time visualization)
                     if effect_settings.get('blur_overlay_enabled', False):
                         img = apply_blur_overlay_to_preview(img, effect_settings)
