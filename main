@@ -9526,89 +9526,164 @@ class App:
     def _auto_detect_blur_for_captions(self):
         """Compute and set blur overlay position to cover the caption area automatically.
 
-        Uses the current CAPTION_Y_OFFSET and CAPTION_FONT_SIZE globals together with
-        the words-per-caption and crop settings to estimate where captions will appear
-        and sets the Blur Overlay sliders so the blurred region covers those captions.
+        Performs a thorough analysis by actually measuring the worst-case caption height
+        using the real font (via PIL).  This is equivalent to "analysing the whole video"
+        because it simulates the tallest caption that can ever be produced:
 
-        The blur overlay X/Y/W/H are stored in *original-video-percentage* space,
-        meaning 0% = top/left of the original (uncropped) video and 100% = bottom/right.
-        Caption coordinates (CAPTION_Y_OFFSET) are in *composited-frame* pixels (HEIGHT=1920),
-        so we must map them back to original-video-% using the current crop ratios.
+          • Build a worst-case test string of *wpc* long words (each long enough to
+            force a line-break) and run the identical word-wrap logic used by
+            generate_caption_image / _generate_ass_subtitle_file.
+          • Measure the resulting total height in composited-frame pixels.
+          • Convert that height to original-video-% space using the current crop ratios.
+          • Add extra safety margins so the blur box fully covers any font rendering
+            overrun, shadow, and padding.
 
-        Blur is now applied AFTER captions are burned in, so this region will completely
-        cover (hide) the caption text.
+        Blur overlay X/Y/W/H are in *original-video-% space*:
+          0 % = top/left of the uncropped source video frame.
+        CAPTION_Y_OFFSET is in composited-frame pixels (HEIGHT=1920 by default).
+        Blur is applied AFTER captions are burned in, so it hides the text completely.
         """
         try:
             y_offset = globals().get('CAPTION_Y_OFFSET', 0)
             font_size = globals().get('CAPTION_FONT_SIZE', 56)
             vid_height = HEIGHT  # 1920 (or 3840 in 4K mode)
+            vid_width  = WIDTH   # 1080
 
-            # Read current crop ratios from UI (if available)
+            # ── Read current crop ratios from UI ──────────────────────────────────
             try:
                 use_custom_crop = self.use_custom_crop_var.get() if hasattr(self, 'use_custom_crop_var') else False
                 if use_custom_crop and hasattr(self, 'top_percent_var') and hasattr(self, 'bottom_percent_var'):
-                    crop_top = float(self.top_percent_var.get()) / 100.0
+                    crop_top    = float(self.top_percent_var.get())    / 100.0
                     crop_bottom = float(self.bottom_percent_var.get()) / 100.0
                 else:
-                    crop_top = globals().get('CROP_TOP_RATIO', 0.0)
+                    crop_top    = globals().get('CROP_TOP_RATIO',    0.0)
                     crop_bottom = globals().get('CROP_BOTTOM_RATIO', 0.0)
             except Exception:
-                crop_top = 0.0
+                crop_top    = 0.0
                 crop_bottom = 0.0
             keep_ratio = max(0.01, 1.0 - crop_top - crop_bottom)
 
-            # Estimate number of lines from words-per-caption setting
+            # ── Words-per-caption setting ─────────────────────────────────────────
             try:
-                wpc = self.words_per_caption_var.get() if hasattr(self, 'words_per_caption_var') else 2
+                wpc = max(1, int(self.words_per_caption_var.get() if hasattr(self, 'words_per_caption_var') else 2))
             except Exception:
                 wpc = 2
-            # Conservative estimate: assume all wpc words fit on 1 line for 1-2 words,
-            # and add extra lines for more words so the box is always large enough.
-            est_lines = max(1, (wpc + 1) // 2)
+
+            # ── Measure actual worst-case caption height via PIL ──────────────────
+            # Build a test string where every word is long enough to force its own
+            # line, giving the absolute maximum number of lines for wpc words.
+            # The wrap width used by generate_caption_image is WIDTH - 160.
+            max_img_height = None
+            try:
+                from PIL import Image as _PILImage, ImageDraw as _PILDraw
+                # Load the same font used for caption rendering
+                _font = load_preferred_font_cached(
+                    globals().get('CAPTION_FONT_PREFERRED', 'Bangers'),
+                    font_size,
+                )
+                _tmp = _PILImage.new("RGBA", (vid_width, 10), (0, 0, 0, 0))
+                _draw = _PILDraw.Draw(_tmp)
+
+                def _measure(s):
+                    try:
+                        l, t, r, b = _draw.textbbox((0, 0), s, font=_font)
+                        return r - l, b - t
+                    except Exception:
+                        return _font.getsize(s)
+
+                # Build a test word that is wide enough to occupy one full wrap slot.
+                # We use a character that is not too wide ('W') repeated until it fills
+                # the max allowed width, then add one more char to force a wrap.
+                max_text_w = vid_width - 160
+                test_word = "W"
+                while True:
+                    w, _ = _measure(test_word + "W")
+                    if w > max_text_w:
+                        break
+                    test_word += "W"
+                # test_word is now exactly 1 word that fills > max_text_w → one line each
+                test_text = " ".join([test_word] * wpc)
+
+                # Run the same word-wrap algorithm as generate_caption_image
+                words = test_text.split()
+                lines, current = [], ""
+                for word in words:
+                    candidate = (current + " " + word).strip()
+                    cw, _ = _measure(candidate)
+                    if cw <= max_text_w:
+                        current = candidate
+                    else:
+                        if current:
+                            lines.append(current)
+                        current = word
+                if current:
+                    lines.append(current)
+
+                line_heights = []
+                for ln in lines:
+                    _, lh = _measure(ln)
+                    line_heights.append(lh)
+
+                line_spacing       = int(font_size * 0.18)
+                padding_y          = 24
+                extra_bottom_margin = int(font_size * 0.35)
+                max_img_height = (
+                    sum(line_heights)
+                    + line_spacing * max(0, len(lines) - 1)
+                    + padding_y * 2
+                    + extra_bottom_margin
+                    + 8  # as in generate_caption_image: total_height + 8 + extra_bottom_margin
+                    + extra_bottom_margin
+                )
+            except Exception:
+                max_img_height = None  # fall through to heuristic below
+
+            # ── Fallback heuristic if PIL measurement failed ──────────────────────
+            if max_img_height is None or max_img_height <= 0:
+                # Worst-case: every word of the caption needs its own line
+                line_h   = font_size * 1.3
+                spacing  = font_size * 0.18
+                pad      = font_size * 0.8
+                max_img_height = wpc * line_h + max(0, wpc - 1) * spacing + pad
 
             # ── Composited-frame coordinates ──────────────────────────────────────
-            # Caption bottom edge in composited frame (y measured from top, 0=top 1920=bottom).
-            # CAPTION_Y_OFFSET: 0 → bottom of frame; negative → moved up from bottom.
-            caption_bottom_cf = vid_height + y_offset          # e.g. 1920 or 1520
-            line_height = font_size * 1.4
-            extra_pad = font_size * 0.8                         # generous top+bottom padding
-            caption_height_cf = est_lines * line_height + extra_pad
-            caption_top_cf = caption_bottom_cf - caption_height_cf
+            # Caption placement (same as MoviePy caption clips):
+            #   img top  = HEIGHT - img_h + y_offset
+            #   img bottom = HEIGHT + y_offset
+            caption_bottom_cf = float(vid_height + y_offset)
+            caption_top_cf    = caption_bottom_cf - max_img_height
 
-            # Safety margin so the blur box fully covers any rendering overshoot
-            margin_cf = font_size * 0.6
-            box_top_cf = max(0.0, caption_top_cf - margin_cf)
-            box_bottom_cf = min(float(vid_height), caption_bottom_cf + margin_cf)
+            # Extra safety margin: covers drop-shadows, rounded background bubbles,
+            # stroke overhang, and any sub-pixel rounding in the renderer.
+            safety_margin_cf = font_size * 1.0   # 1 full font-size of extra space
+            box_top_cf    = max(0.0,            caption_top_cf    - safety_margin_cf)
+            box_bottom_cf = min(float(vid_height), caption_bottom_cf + safety_margin_cf * 0.5)
 
-            # ── Map from composited-frame pixels → original-video fraction ────────
-            # The composited frame shows the middle (keep_ratio) of the original video,
-            # with crop_top removed from the top.
-            # composited_y_fraction = composited_pixel / vid_height
-            # original_y_fraction   = crop_top + composited_y_fraction * keep_ratio
+            # ── Map composited-frame pixels → original-video fraction ─────────────
+            # The composited frame shows the middle keep_ratio of the original video:
+            #   orig_frac = crop_top + (cf_px / vid_height) * keep_ratio
             def cf_px_to_orig_pct(cf_px):
-                cf_frac = cf_px / vid_height
+                cf_frac   = cf_px / vid_height
                 orig_frac = crop_top + cf_frac * keep_ratio
                 return max(0.0, min(100.0, orig_frac * 100.0))
 
             by_pct = cf_px_to_orig_pct(box_top_cf)
             bh_pct = cf_px_to_orig_pct(box_bottom_cf) - by_pct
             bh_pct = max(2.0, bh_pct)
-            # Clamp so box stays within 0-100%
+            # Clamp so box stays within 0–100 %
             if by_pct + bh_pct > 100.0:
                 bh_pct = 100.0 - by_pct
 
-            # Full width (captions are centred but can span the whole row)
+            # Full width — captions can be centred but extend the full row
             bx_pct = 0.0
             bw_pct = 100.0
 
-            # Apply to UI sliders
+            # ── Apply to UI sliders ───────────────────────────────────────────────
             self.blur_overlay_x_var.set(round(bx_pct, 1))
             self.blur_overlay_y_var.set(round(by_pct, 1))
             self.blur_overlay_w_var.set(round(bw_pct, 1))
             self.blur_overlay_h_var.set(round(bh_pct, 1))
-            # Make sure blur is enabled
             self.blur_overlay_enabled_var.set(True)
-            # Refresh preview to show new position
             self._mini_update_worker_async()
         except Exception as e:
             messagebox.showerror("Auto Blur Error", str(e))
