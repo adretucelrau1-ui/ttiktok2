@@ -3932,6 +3932,144 @@ def _generate_capcut_metadata():
     ]
 
 
+def _compute_caption_blur_box_from_segments(
+        caption_segments, font_size, caption_y_offset, words_per_caption,
+        crop_top_ratio, crop_bottom_ratio, video_height, video_width=None,
+        preferred_font=None, log_fn=None):
+    """Compute the blur overlay box Y/H to cover ALL captions by measuring actual PIL heights.
+
+    Iterates through every caption segment, word-wraps the text with the actual
+    font metrics (same algorithm as generate_caption_image), measures the pixel
+    height of each rendered caption image, and uses the maximum to place a blur
+    box that fully covers the tallest possible caption in the composited frame.
+
+    This is equivalent to "analysing the whole video" because it processes every
+    caption that will appear, not just an estimate based on words-per-caption.
+
+    Args:
+        caption_segments: List of {'text', 'start', 'end'} dicts.
+        font_size: Caption font size in pixels.
+        caption_y_offset: CAPTION_Y_OFFSET in composited-frame pixels.
+        words_per_caption: Fallback words-per-caption for heuristic (unused when PIL works).
+        crop_top_ratio: Fraction of original video cropped from the top (0-1).
+        crop_bottom_ratio: Fraction of original video cropped from the bottom (0-1).
+        video_height: Composited frame height in pixels (typically HEIGHT=1920).
+        video_width: Composited frame width in pixels (typically WIDTH=1080).
+        preferred_font: Font path or name to load (None = use global).
+        log_fn: Optional logging function.
+
+    Returns:
+        (by_pct, bh_pct) in original-video-% space, or None on failure.
+    """
+    if not caption_segments:
+        return None
+
+    if video_width is None:
+        video_width = globals().get('WIDTH', 1080)
+
+    keep_ratio = max(0.01, 1.0 - crop_top_ratio - crop_bottom_ratio)
+
+    max_img_height = 0
+    segments_measured = 0
+
+    try:
+        from PIL import Image as _PILImage, ImageDraw as _PILDraw
+
+        _font_pref = preferred_font or globals().get('CAPTION_FONT_PREFERRED', 'Bangers')
+        _font = load_preferred_font_cached(_font_pref, font_size)
+        _tmp = _PILImage.new("RGBA", (video_width, 10), (0, 0, 0, 0))
+        _draw = _PILDraw.Draw(_tmp)
+
+        def _measure(s):
+            try:
+                l, t, r, b = _draw.textbbox((0, 0), s, font=_font)
+                return r - l, b - t
+            except Exception:
+                try:
+                    return _font.getsize(s)
+                except Exception:
+                    return int(font_size * 0.6 * len(s)), font_size
+
+        max_text_w = video_width - 160
+
+        for seg in caption_segments:
+            text = (seg.get('text') or '').strip()
+            if not text:
+                continue
+            # Identical word-wrap as generate_caption_image
+            words = text.split()
+            lines, current = [], ""
+            for word in words:
+                candidate = (current + " " + word).strip()
+                cw, _ = _measure(candidate)
+                if cw <= max_text_w:
+                    current = candidate
+                else:
+                    if current:
+                        lines.append(current)
+                    current = word
+            if current:
+                lines.append(current)
+
+            line_heights = [_measure(ln)[1] for ln in lines]
+            line_spacing = int(font_size * 0.18)
+            padding_y = 24
+            extra_bottom_margin = int(font_size * 0.35)
+            img_h = (
+                sum(line_heights)
+                + line_spacing * max(0, len(lines) - 1)
+                + padding_y * 2
+                + extra_bottom_margin
+                + 8
+                + extra_bottom_margin
+            )
+            if img_h > max_img_height:
+                max_img_height = img_h
+            segments_measured += 1
+
+        if log_fn and segments_measured:
+            log_fn(f"[BLUR-AUTO] Analyzed {segments_measured} caption segments → max height {max_img_height}px")
+    except Exception as e:
+        if log_fn:
+            log_fn(f"[BLUR-AUTO] PIL measurement failed ({e}), falling back to heuristic")
+
+    # Fallback heuristic if PIL failed or nothing was measured
+    if max_img_height <= 0:
+        line_h = font_size * 1.3
+        spacing = font_size * 0.18
+        pad = font_size * 0.8
+        wpc = max(1, words_per_caption)
+        max_img_height = wpc * line_h + max(0, wpc - 1) * spacing + pad
+        if log_fn:
+            log_fn(f"[BLUR-AUTO] Heuristic caption height: {max_img_height:.0f}px (wpc={wpc})")
+
+    # Composited-frame coordinates
+    caption_bottom_cf = float(video_height + caption_y_offset)
+    caption_top_cf = caption_bottom_cf - max_img_height
+    safety_cf = max(float(font_size), 30.0)
+    box_top_cf = max(0.0, caption_top_cf - safety_cf)
+    box_bottom_cf = min(float(video_height), caption_bottom_cf + safety_cf * 0.5)
+
+    # Map composited-frame pixels → original-video fraction
+    def cf_px_to_orig_pct(cf_px):
+        cf_frac = cf_px / video_height
+        orig_frac = crop_top_ratio + cf_frac * keep_ratio
+        return max(0.0, min(100.0, orig_frac * 100.0))
+
+    by_pct = cf_px_to_orig_pct(box_top_cf)
+    bh_pct = cf_px_to_orig_pct(box_bottom_cf) - by_pct
+    bh_pct = max(2.0, bh_pct)
+    if by_pct + bh_pct > 100.0:
+        bh_pct = 100.0 - by_pct
+
+    if log_fn:
+        log_fn(f"[BLUR-AUTO] Blur box: y={by_pct:.1f}% h={bh_pct:.1f}% "
+               f"(y_offset={caption_y_offset}px, max_caption_h={max_img_height:.0f}px, "
+               f"crop_top={crop_top_ratio*100:.1f}%, keep={keep_ratio*100:.1f}%)")
+
+    return by_pct, bh_pct
+
+
 def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, output_path, video_width, video_height, log_fn, effect_settings=None, mirror_video=False, target_duration=None, preferred_font=None, words_per_caption=2, text_color_rgba=None, stroke_color_rgba=None, stroke_width=None, font_size=None, blur_radius=None, dim_factor=None, bg_scale_extra=None, crop_top_ratio=None, crop_bottom_ratio=None, caption_y_offset=None, force_cpu=False):
     """
     Fast export using pure FFmpeg complex filters.
@@ -4550,7 +4688,26 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
             bw_pct = float(blur_ov.get('blur_overlay_w', 20))
             bh_pct = float(blur_ov.get('blur_overlay_h', 15))
             b_intensity = int(blur_ov.get('blur_overlay_intensity', 20))
-            
+
+            # Automatically recompute Y/H from the actual caption segments so that
+            # the blur ALWAYS fully covers all captions without manual slider tuning.
+            # This is the "analyze the whole video" step requested by the user.
+            if caption_segments:
+                _y_off = caption_y_offset if caption_y_offset is not None else globals().get('CAPTION_Y_OFFSET', 0)
+                _fs = font_size if font_size is not None else globals().get('CAPTION_FONT_SIZE', 56)
+                _wpc = words_per_caption or globals().get('WORDS_PER_GROUP', 2)
+                auto_box = _compute_caption_blur_box_from_segments(
+                    caption_segments, _fs, _y_off, _wpc,
+                    crop_top_ratio, crop_bottom_ratio, video_height,
+                    video_width=video_width,
+                    preferred_font=preferred_font,
+                    log_fn=log_fn
+                )
+                if auto_box is not None:
+                    by_pct, bh_pct = auto_box
+                    bx_pct = 0.0    # full-width blur
+                    bw_pct = 100.0
+
             # Transform coordinates from original-video-relative to composited-frame.
             # X: no crop in X direction, so simply offset by foreground position.
             # Y: the top crop_top_ratio of the original is removed, and the visible
