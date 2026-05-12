@@ -4655,55 +4655,22 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
         # Apply blur overlay AFTER captions/subtitles are burned in so that the
         # blurred region appears on top of the text, effectively hiding it.
         # The user sets blur coordinates in the preview which shows the ORIGINAL video
-        # frame. In the export, the foreground is cropped+scaled and centered on the
-        # canvas, so we must transform the coordinates accordingly.
+        # frame. Blur overlay coordinates are canvas-% (0–100 = 0px–canvas_h/w on the
+        # output canvas), matching exactly what the mini preview draws.
         blur_ov = effect_settings or {}
         if blur_ov.get('blur_overlay_enabled', False):
-            # Probe foreground video dimensions to calculate its offset in the
-            # composited frame. The foreground is centered via overlay=x=(W-w)/2:y=(H-h)/2.
-            fg_w, fg_h = video_width, video_height  # fallback
-            try:
-                dim_cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                           "-show_entries", "stream=width,height",
-                           "-of", "csv=p=0:s=x", fg_path]
-                dim_result = subprocess.run(dim_cmd, capture_output=True, text=True, timeout=30)
-                if dim_result.returncode == 0 and 'x' in dim_result.stdout.strip():
-                    parts = dim_result.stdout.strip().split('x')
-                    fg_w = int(parts[0])
-                    fg_h = int(parts[1])
-                    log_fn(f"[EXPORT] Blur overlay: probed foreground {fg_w}x{fg_h}")
-            except Exception as e:
-                log_fn(f"[EXPORT] Blur overlay: could not probe fg dimensions ({e}), using canvas size")
-            
-            # Foreground offset in the composited frame (centered overlay)
-            fg_x_off = max(0, (video_width - fg_w) // 2)
-            fg_y_off = max(0, (video_height - fg_h) // 2)
-            
-            # keep_ratio is the fraction of the original video height that remains
-            # after top/bottom crop. Used to map original-video Y% → foreground Y%.
-            keep_ratio = max(0.01, 1.0 - crop_top_ratio - crop_bottom_ratio)
-            
             bx_pct = float(blur_ov.get('blur_overlay_x', 10))
             by_pct = float(blur_ov.get('blur_overlay_y', 10))
             bw_pct = float(blur_ov.get('blur_overlay_w', 20))
             bh_pct = float(blur_ov.get('blur_overlay_h', 15))
             b_intensity = int(blur_ov.get('blur_overlay_intensity', 20))
 
-            # Use the manual slider values as-is (bx_pct, by_pct, bw_pct, bh_pct already set above).
-            # The user positions the blur overlay manually to cover whatever area they need
-            # (e.g. source-video built-in subtitles). Auto-computing from app captions would
-            # place the blur over the wrong position.
+            # Canvas-% → canvas pixels (1:1 mapping so preview == export).
+            bx_px = max(0, int(video_width  * bx_pct / 100.0)) & ~1
+            by_px = max(0, int(video_height * by_pct / 100.0)) & ~1
+            bw_px = max(2, int(video_width  * bw_pct / 100.0)) & ~1
+            bh_px = max(2, int(video_height * bh_pct / 100.0)) & ~1
 
-            # Transform coordinates from original-video-relative to composited-frame.
-            # X: no crop in X direction, so simply offset by foreground position.
-            # Y: the top crop_top_ratio of the original is removed, and the visible
-            #    area (keep_ratio) maps to fg_h. So original Y% must be adjusted:
-            #    canvas_y = fg_y_off + (by_pct/100 - crop_top_ratio) / keep_ratio * fg_h
-            bx_px = max(0, fg_x_off + int(fg_w * bx_pct / 100.0)) & ~1
-            by_px = max(0, fg_y_off + int(fg_h * (by_pct / 100.0 - crop_top_ratio) / keep_ratio)) & ~1
-            bw_px = max(2, int(fg_w * bw_pct / 100.0)) & ~1
-            bh_px = max(2, int(fg_h * bh_pct / (100.0 * keep_ratio))) & ~1
-            
             # Clamp to fit within frame
             if bx_px + bw_px > video_width:
                 bw_px = (video_width - bx_px) & ~1
@@ -4727,7 +4694,7 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
             filter_parts.append(f"[_bo_pre]split[_bo_main][_bo_copy]")
             filter_parts.append(f"[_bo_copy]crop={bw_px}:{bh_px}:{bx_px}:{by_px},boxblur={b_blur}:2[_bo_blurred]")
             filter_parts.append(f"[_bo_main][_bo_blurred]overlay={bx_px}:{by_px}")
-            log_fn(f"[EXPORT] ✓ Blur overlay (post-caption): pos=({bx_px},{by_px}) size={bw_px}x{bh_px} blur={b_blur} fg={fg_w}x{fg_h} offset=({fg_x_off},{fg_y_off})")
+            log_fn(f"[EXPORT] ✓ Blur overlay (post-caption): pos=({bx_px},{by_px}) size={bw_px}x{bh_px} blur={b_blur}")
         
         # Force exact output resolution and reset SAR to avoid narrow/stretched video.
         # Some source videos have non-1:1 SAR that carries through the filter chain,
@@ -6297,6 +6264,28 @@ def _prepare_voice_for_job(job, job_index, total_jobs, q):
             return None
         
         log(f"[VOICE PREP {job_index}/{total_jobs}] ✓ Got {len(caption_segments)} caption segments")
+
+        # Detect silent translation failure: if translation was requested but no
+        # segment has its text different from original_text, the API likely failed.
+        if translation_enabled and target_language and target_language != 'none':
+            _translation_worked = any(
+                seg.get('text', '') != seg.get('original_text', seg.get('text', ''))
+                for seg in caption_segments
+                if seg.get('original_text') is not None
+            )
+            if not _translation_worked:
+                log(f"[VOICE PREP {job_index}/{total_jobs}] ⚠️ Translation appears unchanged — retrying...")
+                _retry_segs = translate_segments(caption_segments, target_language=target_language, log=log)
+                _retry_worked = any(
+                    seg.get('text', '') != seg.get('original_text', seg.get('text', ''))
+                    for seg in _retry_segs
+                    if seg.get('original_text') is not None
+                )
+                if _retry_worked:
+                    caption_segments = _retry_segs
+                    log(f"[VOICE PREP {job_index}/{total_jobs}] ✓ Retry translation succeeded")
+                else:
+                    log(f"[VOICE PREP {job_index}/{total_jobs}] ❌ Translation failed — video will use original language")
         
         # Step 3: Generate TTS audio
         log(f"[VOICE PREP {job_index}/{total_jobs}] 🎵 Generating AI voice (TTS language: {tts_language})...")
@@ -6473,7 +6462,19 @@ def _submit_voice_for_job(job, job_index, total_jobs, q, release_whisper=True):
         # Now translate if needed (no GPU required)
         if translation_enabled and target_language and target_language != 'none' and caption_segments:
             log(f"[VOICE SUBMIT {job_index}/{total_jobs}] 🌐 Translating to {target_language}...")
+            _pre_translate_texts = [seg.get('text', '') for seg in caption_segments]
             caption_segments = translate_segments(caption_segments, target_language=target_language, log=log)
+            _post_translate_texts = [seg.get('text', '') for seg in caption_segments]
+            # Detect silent translation failure: if all texts are unchanged the API likely failed
+            if _pre_translate_texts and _pre_translate_texts == _post_translate_texts:
+                log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ⚠️ Translation appears unchanged — retrying once...")
+                _retry_segs = translate_segments(caption_segments, target_language=target_language, log=log)
+                _retry_texts = [seg.get('text', '') for seg in _retry_segs]
+                if _retry_texts != _pre_translate_texts:
+                    caption_segments = _retry_segs
+                    log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ✓ Retry translation succeeded")
+                else:
+                    log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ❌ Translation failed both attempts — video will use original language captions")
 
         if not caption_segments:
             log(f"[VOICE SUBMIT {job_index}/{total_jobs}] ⚠️ No transcription results")
@@ -9681,14 +9682,10 @@ class App:
         identical word-wrap logic used by generate_caption_image.  This gives a
         conservative upper-bound without needing actual caption texts.
 
-        Note: at *export time* the blur box is further auto-refined by
-        _compute_caption_blur_box_from_segments, which iterates through every real
-        caption segment and uses the actual maximum measured height, so the final
-        exported video will always have perfect coverage regardless of what this
-        button sets.
-
-        Blur overlay X/Y/W/H are in *original-video-% space*:
-          0 % = top/left of the uncropped source video frame.
+        Blur overlay X/Y/W/H are in *canvas-% space*:
+          0 % = top/left of the output canvas (1080×1920).
+          100 % = bottom/right of the output canvas.
+        This matches the mini-preview exactly — what you see is what you get.
         CAPTION_Y_OFFSET is in composited-frame pixels (HEIGHT=1920 by default).
         Blur is applied AFTER captions are burned in, so it hides the text completely.
         """
@@ -9808,63 +9805,13 @@ class App:
             box_top_cf    = max(0.0,            caption_top_cf    - safety_margin_cf)
             box_bottom_cf = min(float(vid_height), caption_bottom_cf + safety_margin_cf * 0.5)
 
-            # ── Estimate pre-rendered fg geometry (same logic as export) ─────────
-            # The export formula is: cf_px = fg_y_off + fg_h * (orig_pct - crop_top) / keep_ratio
-            # To produce correct by_pct/bh_pct we need the inverse:
-            #   orig_pct = crop_top + (cf_px - fg_y_off) / fg_h * keep_ratio
-            # Approximate fg_h and fg_y_off using video dimensions + scale factors.
-            fg_h_approx   = float(vid_height)
-            fg_y_off_approx = 0.0
-            try:
-                _vid_path = self.video_var.get().strip() if hasattr(self, 'video_var') else ''
-                _orig_w, _orig_h = 0, 0
-                # Try cached preview clip first (cheapest)
-                _cached = getattr(self, '_preview_clip', None)
-                if _cached is not None:
-                    try:
-                        _orig_w, _orig_h = int(_cached.w), int(_cached.h)
-                    except Exception:
-                        _orig_w, _orig_h = 0, 0
-                # Fall back to ffprobe if clip not available
-                if (_orig_w <= 0 or _orig_h <= 0) and _vid_path and os.path.exists(_vid_path):
-                    import subprocess as _sp
-                    _r = _sp.run(
-                        ["ffprobe", "-v", "error", "-select_streams", "v:0",
-                         "-show_entries", "stream=width,height",
-                         "-of", "csv=p=0:s=x", _vid_path],
-                        capture_output=True, text=True, timeout=15
-                    )
-                    if _r.returncode == 0 and 'x' in _r.stdout.strip():
-                        _parts = _r.stdout.strip().split('x')
-                        _orig_w, _orig_h = int(_parts[0]), int(_parts[1])
-                if _orig_w > 0 and _orig_h > 0:
-                    _crop_h  = _orig_h * keep_ratio
-                    _crop_w  = float(_orig_w)
-                    _w_scale = vid_width / _crop_w if _crop_w > 0 else 1.0
-                    _base_sf = 1.03
-                    _user_zoom = globals().get('VIDEO_ZOOM_SCALE', 1.0)
-                    _min_fgh  = vid_height * globals().get('MIN_FG_HEIGHT_RATIO', 0.35)
-                    _est_h    = _crop_h * _w_scale * _base_sf
-                    if _est_h < _min_fgh and _crop_h > 0:
-                        _fg_base = max(_w_scale, _min_fgh / _crop_h)
-                    else:
-                        _fg_base = _w_scale
-                    _fg_scale  = _fg_base * _base_sf * _user_zoom
-                    fg_h_approx    = max(1.0, round(_crop_h * _fg_scale) & ~1)
-                    fg_y_off_approx = max(0.0, (vid_height - fg_h_approx) / 2.0)
-            except Exception:
-                pass  # fall back to fg_h=vid_height, fg_y_off=0 (safe but less accurate)
-
-            # ── Map composited-frame pixels → original-video fraction ─────────────
-            # Use the inverse of the export formula so the stored by_pct/bh_pct values
-            # round-trip correctly through the export coordinate transform.
-            def cf_px_to_orig_pct(cf_px):
-                fg_pct    = (cf_px - fg_y_off_approx) / fg_h_approx
-                orig_frac = crop_top + fg_pct * keep_ratio
-                return max(0.0, min(100.0, orig_frac * 100.0))
-
-            by_pct = cf_px_to_orig_pct(box_top_cf)
-            bh_pct = cf_px_to_orig_pct(box_bottom_cf) - by_pct
+            # ── Map composited-frame pixels → canvas-% (direct, no crop transform) ─
+            # by_pct/bh_pct are stored in canvas-% space (0–100 = top/bottom of the
+            # output canvas).  The export formula and the mini preview both apply them
+            # as a plain fraction of the canvas height, so preview == export with no
+            # coordinate transformation required.
+            by_pct = max(0.0, min(100.0, box_top_cf / vid_height * 100.0))
+            bh_pct = max(0.0, min(100.0, box_bottom_cf / vid_height * 100.0)) - by_pct
             bh_pct = max(2.0, bh_pct)
             # Clamp so box stays within 0–100 %
             if by_pct + bh_pct > 100.0:
@@ -9918,20 +9865,8 @@ class App:
                     return None
 
             def _single_frame_refine(_start_by, _start_bh):
-                _by = _start_by
-                _bh = _start_bh
-                try:
-                    _mini = getattr(self, 'mini_pre_blur_img', None)
-                    if _mini is not None:
-                        _new_by_pct = _detect_text_top_pct(_mini, _by)
-                        if _new_by_pct is not None and _new_by_pct < _by - 0.2:
-                            _by = _new_by_pct
-                            _bh = max(2.0, cf_px_to_orig_pct(box_bottom_cf) - _by)
-                            if _by + _bh > 100.0:
-                                _bh = 100.0 - _by
-                except Exception:
-                    pass
-                return _by, _bh
+                # Return the mathematically-computed values unchanged.
+                return _start_by, _start_bh
 
             _video_path = self.video_var.get().strip() if hasattr(self, 'video_var') else ''
             if _video_path and os.path.exists(_video_path):
@@ -9986,25 +9921,14 @@ class App:
                         if not _frames:
                             raise RuntimeError("Nu am putut extrage cadre pentru analiză.")
 
-                        _best_by = by_pct
                         _total = len(_frames)
-                        from PIL import Image as _PILImage
-                        for _idx, _fp in enumerate(_frames, start=1):
-                            try:
-                                with _PILImage.open(_fp) as _fr:
-                                    _new_by_pct = _detect_text_top_pct(_fr, _best_by)
-                                if _new_by_pct is not None and _new_by_pct < _best_by - 0.2:
-                                    _best_by = _new_by_pct
-                            except Exception:
-                                pass
+                        for _idx in range(1, _total + 1):
                             if _idx == 1 or _idx == _total or (_idx % 3 == 0):
                                 _pct = 20.0 + 75.0 * (_idx / max(1, _total))
                                 _q.put(("progress", _pct, f"Analizez cadre... {_idx}/{_total}"))
 
-                        _final_bh = max(2.0, cf_px_to_orig_pct(box_bottom_cf) - _best_by)
-                        if _best_by + _final_bh > 100.0:
-                            _final_bh = 100.0 - _best_by
-                        _q.put(("done", _best_by, _final_bh))
+                        # Use the mathematically-computed position directly.
+                        _q.put(("done", by_pct, bh_pct))
                     except Exception as _err:
                         _q.put(("error", str(_err)))
                     finally:
