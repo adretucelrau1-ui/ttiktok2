@@ -11479,29 +11479,38 @@ class App:
 
         Called by blur overlay sliders so the preview and cyan indicator update
         immediately without re-extracting the video frame from disk.
+        A "pending" flag ensures the final slider position is always rendered
+        even when intermediate updates are dropped while a thread is busy.
         """
         base = getattr(self, 'mini_pre_blur_img', None)
         if base is None:
             # No cached frame yet — fall back to full async update
             self._mini_update_worker_async()
             return
+        # Mark that a new update is needed regardless of thread state
+        self._blur_fast_pending = True
         # Run PIL work in a background thread to keep the UI responsive
         if getattr(self, '_blur_fast_thread', None) and self._blur_fast_thread.is_alive():
             return
         def _do():
-            try:
-                effect_settings = self._get_current_effect_settings()
-                img = base.copy()
-                if effect_settings.get('blur_overlay_enabled', False):
-                    img = apply_blur_overlay_to_preview(img, effect_settings)
-                top_pct = float(self.top_percent_var.get()) / 100.0
-                bottom_pct = float(self.bottom_percent_var.get()) / 100.0
-                composed = overlay_crop_on_image(img, top_pct, bottom_pct)
-                self.mini_base_img = img
-                self.root.after(0, lambda: self._redraw_mini_canvas_with_caption_indicator(
-                    composed, top_pct, bottom_pct))
-            except Exception:
-                pass
+            while getattr(self, '_blur_fast_pending', False):
+                self._blur_fast_pending = False
+                try:
+                    cur_base = getattr(self, 'mini_pre_blur_img', None)
+                    if cur_base is None:
+                        break
+                    effect_settings = self._get_current_effect_settings()
+                    img = cur_base.copy()
+                    if effect_settings.get('blur_overlay_enabled', False):
+                        img = apply_blur_overlay_to_preview(img, effect_settings)
+                    top_pct = float(self.top_percent_var.get()) / 100.0
+                    bottom_pct = float(self.bottom_percent_var.get()) / 100.0
+                    composed = overlay_crop_on_image(img, top_pct, bottom_pct)
+                    self.mini_base_img = img
+                    self.root.after(0, lambda c=composed, tp=top_pct, bp=bottom_pct:
+                        self._redraw_mini_canvas_with_caption_indicator(c, tp, bp))
+                except Exception:
+                    break
         self._blur_fast_thread = threading.Thread(target=_do, daemon=True)
         self._blur_fast_thread.start()
 
