@@ -9870,6 +9870,61 @@ class App:
             if by_pct + bh_pct > 100.0:
                 bh_pct = 100.0 - by_pct
 
+            # ── Extend upward if source-video text detected above the blur ────────
+            # Scan the current mini preview frame for caption-like content
+            # (white text with dark stroke) in the visible area above the computed
+            # blur top.  This covers burned-in captions from a previous export or
+            # source-video subtitles that should also be hidden by the blur box.
+            try:
+                _mini = getattr(self, 'mini_pre_blur_img', None)
+                if _mini is not None:
+                    from PIL import ImageFilter as _ImF
+                    import numpy as _npx
+                    _ch     = _mini.size[1]
+                    _top_v  = int(crop_top * _ch)        # first visible row
+                    _blur_t = int(by_pct / 100.0 * _ch)  # current blur top row
+                    if _blur_t - _top_v >= 8:
+                        # Grayscale and edge arrays (normalised to 0-1)
+                        _g_arr  = _npx.array(_mini.convert('L'), dtype='float32')
+                        _e_arr  = _npx.array(
+                                      _mini.convert('L').filter(_ImF.FIND_EDGES),
+                                      dtype='float32') / 255.0
+                        # Per-row fractions
+                        _brt_r  = (_g_arr >= 215).mean(axis=1)   # very bright (text body)
+                        _drk_r  = (_g_arr <=  35).mean(axis=1)   # very dark   (stroke)
+                        _edge_r = (_e_arr >=  0.30).mean(axis=1) # strong edges
+                        # Text score: bimodal brightness × edge density.
+                        # Rows with white text + dark stroke score much higher than
+                        # natural scene content.
+                        _score  = _npx.minimum(_brt_r, _drk_r) * _edge_r
+                        # Find first run of ≥4 consecutive rows above threshold —
+                        # that is a text band (single caption line).
+                        _THR, _MIN_CONSEC = 0.010, 4
+                        _consec = 0
+                        _band_st = None
+                        _found   = None
+                        for _ri in range(_top_v, _blur_t):
+                            if _score[_ri] >= _THR:
+                                if _consec == 0:
+                                    _band_st = _ri
+                                _consec += 1
+                                if _consec >= _MIN_CONSEC and _found is None:
+                                    _found = _band_st
+                            else:
+                                _consec = 0
+                        if _found is not None:
+                            _margin   = max(3, int(_ch * 0.02))
+                            _new_by_px  = max(_top_v, _found - _margin)
+                            _new_by_pct = _new_by_px / _ch * 100.0
+                            if _new_by_pct < by_pct - 0.5:
+                                by_pct = _new_by_pct
+                                bh_pct = cf_px_to_orig_pct(box_bottom_cf) - by_pct
+                                bh_pct = max(2.0, bh_pct)
+                                if by_pct + bh_pct > 100.0:
+                                    bh_pct = 100.0 - by_pct
+            except Exception:
+                pass  # frame analysis is best-effort; keep app-caption position
+
             # Full width — captions can be centred but extend the full row
             bx_pct = 0.0
             bw_pct = 100.0
