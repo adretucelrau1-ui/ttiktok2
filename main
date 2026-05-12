@@ -9870,75 +9870,182 @@ class App:
             if by_pct + bh_pct > 100.0:
                 bh_pct = 100.0 - by_pct
 
-            # ── Extend upward if source-video text detected above the blur ────────
-            # Scan the current mini preview frame for caption-like content
-            # (white text with dark stroke) in the visible area above the computed
-            # blur top.  This covers burned-in captions from a previous export or
-            # source-video subtitles that should also be hidden by the blur box.
-            try:
-                _mini = getattr(self, 'mini_pre_blur_img', None)
-                if _mini is not None:
+            def _apply_blur_values(_by_pct, _bh_pct):
+                # Full width — captions can be centred but extend the full row
+                self.blur_overlay_x_var.set(0.0)
+                self.blur_overlay_y_var.set(round(_by_pct, 1))
+                self.blur_overlay_w_var.set(100.0)
+                self.blur_overlay_h_var.set(round(_bh_pct, 1))
+                self.blur_overlay_enabled_var.set(True)
+                self._mini_update_worker_async()
+
+            def _detect_text_top_pct(_img, _current_by_pct):
+                try:
                     from PIL import ImageFilter as _ImF
                     import numpy as _npx
-                    _ch     = _mini.size[1]
-                    _top_v  = int(crop_top * _ch)        # first visible row
-                    _blur_t = int(by_pct / 100.0 * _ch)  # current blur top row
-                    if _blur_t - _top_v >= 8:
-                        # Grayscale and edge arrays (normalised to 0-1)
-                        _g_arr  = _npx.array(_mini.convert('L'), dtype='float32')
-                        _e_arr  = _npx.array(
-                                      _mini.convert('L').filter(_ImF.FIND_EDGES),
-                                      dtype='float32') / 255.0
-                        # Per-row fractions
-                        _brt_r  = (_g_arr >= 215).mean(axis=1)   # very bright (text body)
-                        _drk_r  = (_g_arr <=  35).mean(axis=1)   # very dark   (stroke)
-                        _edge_r = (_e_arr >=  0.30).mean(axis=1) # strong edges
-                        # Caption text score: min(bright_frac, dark_frac) × edge_frac.
-                        # Rows with white text + dark stroke score much higher than
-                        # natural scene content (sky, skin, foliage, etc.).
-                        _txt_score = _npx.minimum(_brt_r, _drk_r) * _edge_r
-                        # Find first run of ≥4 consecutive rows above 0.010 —
-                        # that is a text band (single caption line).
-                        # Threshold 0.010 ≈ min(0.10 bright, 0.10 dark) × 0.10 edge,
-                        # which is comfortably above typical outdoor scene noise.
-                        _THR       = 0.010   # min caption-text score
-                        _MIN_CONSEC = 4      # consecutive rows needed to confirm a text band
-                        _consec = 0
-                        _band_st = None
-                        _found   = None
-                        for _ri in range(_top_v, _blur_t):
-                            if _txt_score[_ri] >= _THR:
-                                if _consec == 0:
-                                    _band_st = _ri
-                                _consec += 1
-                                if _consec >= _MIN_CONSEC and _found is None:
-                                    _found = _band_st
-                            else:
-                                _consec = 0
-                        if _found is not None:
-                            _margin   = max(3, int(_ch * 0.02))
-                            _new_by_px  = max(_top_v, _found - _margin)
-                            _new_by_pct = _new_by_px / _ch * 100.0
-                            if _new_by_pct < by_pct - 0.5:
-                                by_pct = _new_by_pct
-                                bh_pct = cf_px_to_orig_pct(box_bottom_cf) - by_pct
-                                bh_pct = max(2.0, bh_pct)
-                                if by_pct + bh_pct > 100.0:
-                                    bh_pct = 100.0 - by_pct
-            except Exception:
-                pass  # frame analysis is best-effort; keep app-caption position
+                    _ch     = _img.size[1]
+                    _top_v  = int(crop_top * _ch)
+                    _blur_t = int(_current_by_pct / 100.0 * _ch)
+                    if _blur_t - _top_v < 8:
+                        return None
+                    _g_arr  = _npx.array(_img.convert('L'), dtype='float32')
+                    _e_arr  = _npx.array(_img.convert('L').filter(_ImF.FIND_EDGES), dtype='float32') / 255.0
+                    _brt_r  = (_g_arr >= 215).mean(axis=1)
+                    _drk_r  = (_g_arr <=  35).mean(axis=1)
+                    _edge_r = (_e_arr >=  0.30).mean(axis=1)
+                    _txt_score = _npx.minimum(_brt_r, _drk_r) * _edge_r
+                    _THR = 0.010
+                    _MIN_CONSEC = 4
+                    _consec = 0
+                    _band_st = None
+                    _found = None
+                    for _ri in range(_top_v, _blur_t):
+                        if _txt_score[_ri] >= _THR:
+                            if _consec == 0:
+                                _band_st = _ri
+                            _consec += 1
+                            if _consec >= _MIN_CONSEC and _found is None:
+                                _found = _band_st
+                        else:
+                            _consec = 0
+                    if _found is None:
+                        return None
+                    _margin = max(3, int(_ch * 0.02))
+                    _new_by_px = max(_top_v, _found - _margin)
+                    _new_by_pct = _new_by_px / _ch * 100.0
+                    return _new_by_pct
+                except Exception:
+                    return None
 
-            # Full width — captions can be centred but extend the full row
-            bx_pct = 0.0
-            bw_pct = 100.0
+            def _single_frame_refine(_start_by, _start_bh):
+                _by = _start_by
+                _bh = _start_bh
+                try:
+                    _mini = getattr(self, 'mini_pre_blur_img', None)
+                    if _mini is not None:
+                        _new_by_pct = _detect_text_top_pct(_mini, _by)
+                        if _new_by_pct is not None and _new_by_pct < _by - 0.2:
+                            _by = _new_by_pct
+                            _bh = max(2.0, cf_px_to_orig_pct(box_bottom_cf) - _by)
+                            if _by + _bh > 100.0:
+                                _bh = 100.0 - _by
+                except Exception:
+                    pass
+                return _by, _bh
 
-            # ── Apply to UI sliders ───────────────────────────────────────────────
-            self.blur_overlay_x_var.set(round(bx_pct, 1))
-            self.blur_overlay_y_var.set(round(by_pct, 1))
-            self.blur_overlay_w_var.set(round(bw_pct, 1))
-            self.blur_overlay_h_var.set(round(bh_pct, 1))
-            self.blur_overlay_enabled_var.set(True)
-            self._mini_update_worker_async()
+            _video_path = self.video_var.get().strip() if hasattr(self, 'video_var') else ''
+            if _video_path and os.path.exists(_video_path):
+                _progress_win = tk.Toplevel(self.root)
+                _progress_win.title("Analyzing video blur area")
+                _progress_win.geometry("460x130")
+                _progress_win.resizable(False, False)
+                _progress_win.transient(self.root)
+                _progress_win.attributes('-topmost', True)
+                _progress_win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+                _status_var = tk.StringVar(value="Pregătesc analiza video...")
+                ttk.Label(_progress_win, textvariable=_status_var, font=('Segoe UI', 10)).pack(pady=(14, 8))
+                _prog_var = tk.DoubleVar(value=0.0)
+                ttk.Progressbar(_progress_win, variable=_prog_var, maximum=100.0, length=410, mode='determinate').pack()
+                ttk.Label(_progress_win, text="Se analizează tot videoclipul selectat înainte de aplicarea blurului.", font=('Segoe UI', 8)).pack(pady=(8, 0))
+                _progress_win.update_idletasks()
+
+                _q = queue.Queue()
+
+                def _video_scan_worker():
+                    _tmp_dir = tempfile.mkdtemp(prefix="blur_scan_")
+                    try:
+                        _q.put(("progress", 5.0, "Citesc metadatele video..."))
+                        _duration = 0.0
+                        try:
+                            _probe = subprocess.run(
+                                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", _video_path],
+                                capture_output=True, text=True, timeout=20
+                            )
+                            if _probe.returncode == 0:
+                                _duration = max(0.0, float((_probe.stdout or "0").strip() or "0"))
+                        except Exception:
+                            _duration = 0.0
+
+                        _sample_count = max(24, min(160, int(_duration) if _duration > 0 else 48))
+                        _fps = (_sample_count / _duration) if _duration > 0.1 else 0.8
+                        _fps = max(0.08, min(4.0, _fps))
+                        _q.put(("progress", 15.0, "Extrag cadre pentru analiză..."))
+                        _out_pat = os.path.join(_tmp_dir, "frame_%05d.jpg")
+                        _extract = subprocess.run(
+                            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", _video_path,
+                             "-vf", f"fps={_fps:.6f},scale=540:-1:flags=lanczos", "-q:v", "5", _out_pat],
+                            capture_output=True, text=True,
+                            timeout=max(120, int(_duration * 3.0) + 30)
+                        )
+                        if _extract.returncode != 0:
+                            raise RuntimeError((_extract.stderr or "").strip() or "ffmpeg extraction failed")
+
+                        from glob import glob as _glob
+                        _frames = sorted(_glob(os.path.join(_tmp_dir, "frame_*.jpg")))
+                        if not _frames:
+                            raise RuntimeError("Nu am putut extrage cadre pentru analiză.")
+
+                        _best_by = by_pct
+                        _total = len(_frames)
+                        from PIL import Image as _PILImage
+                        for _idx, _fp in enumerate(_frames, start=1):
+                            try:
+                                with _PILImage.open(_fp) as _fr:
+                                    _new_by_pct = _detect_text_top_pct(_fr, _best_by)
+                                if _new_by_pct is not None and _new_by_pct < _best_by - 0.2:
+                                    _best_by = _new_by_pct
+                            except Exception:
+                                pass
+                            if _idx == 1 or _idx == _total or (_idx % 3 == 0):
+                                _pct = 20.0 + 75.0 * (_idx / max(1, _total))
+                                _q.put(("progress", _pct, f"Analizez cadre... {_idx}/{_total}"))
+
+                        _final_bh = max(2.0, cf_px_to_orig_pct(box_bottom_cf) - _best_by)
+                        if _best_by + _final_bh > 100.0:
+                            _final_bh = 100.0 - _best_by
+                        _q.put(("done", _best_by, _final_bh))
+                    except Exception as _err:
+                        _q.put(("error", str(_err)))
+                    finally:
+                        try:
+                            shutil.rmtree(_tmp_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+
+                def _poll_video_scan():
+                    try:
+                        while True:
+                            _msg = _q.get_nowait()
+                            _kind = _msg[0]
+                            if _kind == "progress":
+                                _prog_var.set(float(_msg[1]))
+                                _status_var.set(str(_msg[2]))
+                            elif _kind == "done":
+                                try:
+                                    _progress_win.destroy()
+                                except Exception:
+                                    pass
+                                _apply_blur_values(float(_msg[1]), float(_msg[2]))
+                                return
+                            elif _kind == "error":
+                                try:
+                                    _progress_win.destroy()
+                                except Exception:
+                                    pass
+                                _by2, _bh2 = _single_frame_refine(by_pct, bh_pct)
+                                _apply_blur_values(_by2, _bh2)
+                                return
+                    except queue.Empty:
+                        pass
+                    self.root.after(100, _poll_video_scan)
+
+                threading.Thread(target=_video_scan_worker, daemon=True).start()
+                self.root.after(100, _poll_video_scan)
+                return
+
+            _by2, _bh2 = _single_frame_refine(by_pct, bh_pct)
+            _apply_blur_values(_by2, _bh2)
         except Exception as e:
             messagebox.showerror("Auto Blur Error", str(e))
 
