@@ -9893,18 +9893,21 @@ class App:
                         _brt_r  = (_g_arr >= 215).mean(axis=1)   # very bright (text body)
                         _drk_r  = (_g_arr <=  35).mean(axis=1)   # very dark   (stroke)
                         _edge_r = (_e_arr >=  0.30).mean(axis=1) # strong edges
-                        # Text score: bimodal brightness × edge density.
+                        # Caption text score: min(bright_frac, dark_frac) × edge_frac.
                         # Rows with white text + dark stroke score much higher than
-                        # natural scene content.
-                        _score  = _npx.minimum(_brt_r, _drk_r) * _edge_r
-                        # Find first run of ≥4 consecutive rows above threshold —
+                        # natural scene content (sky, skin, foliage, etc.).
+                        _txt_score = _npx.minimum(_brt_r, _drk_r) * _edge_r
+                        # Find first run of ≥4 consecutive rows above 0.010 —
                         # that is a text band (single caption line).
-                        _THR, _MIN_CONSEC = 0.010, 4
+                        # Threshold 0.010 ≈ min(0.10 bright, 0.10 dark) × 0.10 edge,
+                        # which is comfortably above typical outdoor scene noise.
+                        _THR       = 0.010   # min caption-text score
+                        _MIN_CONSEC = 4      # consecutive rows needed to confirm a text band
                         _consec = 0
                         _band_st = None
                         _found   = None
                         for _ri in range(_top_v, _blur_t):
-                            if _score[_ri] >= _THR:
+                            if _txt_score[_ri] >= _THR:
                                 if _consec == 0:
                                     _band_st = _ri
                                 _consec += 1
