@@ -9826,44 +9826,6 @@ class App:
                 self.blur_overlay_enabled_var.set(True)
                 self._mini_update_worker_async()
 
-            def _detect_text_top_pct(_img, _current_by_pct):
-                try:
-                    from PIL import ImageFilter as _ImF
-                    import numpy as _npx
-                    _ch     = _img.size[1]
-                    _top_v  = int(crop_top * _ch)
-                    _blur_t = int(_current_by_pct / 100.0 * _ch)
-                    if _blur_t - _top_v < 8:
-                        return None
-                    _g_arr  = _npx.array(_img.convert('L'), dtype='float32')
-                    _e_arr  = _npx.array(_img.convert('L').filter(_ImF.FIND_EDGES), dtype='float32') / 255.0
-                    _brt_r  = (_g_arr >= 215).mean(axis=1)
-                    _drk_r  = (_g_arr <=  35).mean(axis=1)
-                    _edge_r = (_e_arr >=  0.30).mean(axis=1)
-                    _txt_score = _npx.minimum(_brt_r, _drk_r) * _edge_r
-                    _THR = 0.010
-                    _MIN_CONSEC = 4
-                    _consec = 0
-                    _band_st = None
-                    _found = None
-                    for _ri in range(_top_v, _blur_t):
-                        if _txt_score[_ri] >= _THR:
-                            if _consec == 0:
-                                _band_st = _ri
-                            _consec += 1
-                            if _consec >= _MIN_CONSEC and _found is None:
-                                _found = _band_st
-                        else:
-                            _consec = 0
-                    if _found is None:
-                        return None
-                    _margin = max(3, int(_ch * 0.02))
-                    _new_by_px = max(_top_v, _found - _margin)
-                    _new_by_pct = _new_by_px / _ch * 100.0
-                    return _new_by_pct
-                except Exception:
-                    return None
-
             def _single_frame_refine(_start_by, _start_bh):
                 # Return the mathematically-computed values unchanged.
                 return _start_by, _start_bh
