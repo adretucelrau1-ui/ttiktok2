@@ -4689,39 +4689,10 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
             bh_pct = float(blur_ov.get('blur_overlay_h', 15))
             b_intensity = int(blur_ov.get('blur_overlay_intensity', 20))
 
-            # Automatically recompute Y/H from the actual caption segments so that
-            # the blur ALWAYS fully covers all captions without manual slider tuning.
-            # This is the "analyze the whole video" step requested by the user.
-            # When caption_segments is empty, use the heuristic (same formula as preview).
-            _y_off = caption_y_offset if caption_y_offset is not None else globals().get('CAPTION_Y_OFFSET', 0)
-            _fs = font_size if font_size is not None else globals().get('CAPTION_FONT_SIZE', 56)
-            _wpc = words_per_caption or globals().get('WORDS_PER_GROUP', 2)
-            _keep_ratio_auto = max(0.01, 1.0 - crop_top_ratio - crop_bottom_ratio)
-            if caption_segments:
-                auto_box = _compute_caption_blur_box_from_segments(
-                    caption_segments, _fs, _y_off, _wpc,
-                    crop_top_ratio, crop_bottom_ratio, video_height,
-                    video_width=video_width,
-                    preferred_font=preferred_font,
-                    log_fn=log_fn
-                )
-            else:
-                # No segments yet — use heuristic directly
-                _line_h = _fs * 1.3
-                _spacing = _fs * 0.18
-                _pad = _fs * 0.8
-                _est_h = max(1, _wpc) * _line_h + max(0, max(1, _wpc) - 1) * _spacing + _pad
-                _safety = max(float(_fs), 30.0)
-                _cap_bot = video_height + _y_off
-                _box_top = max(0.0, _cap_bot - _est_h - _safety)
-                _box_bot = min(float(video_height), _cap_bot + _safety * 0.5)
-                def _pct(px):
-                    return max(0.0, min(100.0, (crop_top_ratio + px / video_height * _keep_ratio_auto) * 100.0))
-                auto_box = (_pct(_box_top), max(2.0, _pct(_box_bot) - _pct(_box_top)))
-            if auto_box is not None:
-                by_pct, bh_pct = auto_box
-                bx_pct = 0.0    # full-width blur
-                bw_pct = 100.0
+            # Use the manual slider values as-is (bx_pct, by_pct, bw_pct, bh_pct already set above).
+            # The user positions the blur overlay manually to cover whatever area they need
+            # (e.g. source-video built-in subtitles). Auto-computing from app captions would
+            # place the blur over the wrong position.
 
             # Transform coordinates from original-video-relative to composited-frame.
             # X: no crop in X direction, so simply offset by foreground position.
@@ -9575,43 +9546,32 @@ class App:
                                         fill="#fff", font=("Arial",9), tags="label_bottom")
             
             # Draw blur box outline on mini_canvas (before caption so captions stay on top).
-            # Position is computed from current caption settings (y_offset, font_size, crop)
-            # so it matches exactly where the blur will be applied in the exported video,
-            # regardless of what the manual sliders say.
+            # Slider values are in original-video-% space; map them to canvas coordinates
+            # by subtracting the top-crop offset and scaling by keep_ratio so the box
+            # appears in exactly the same position as it will in the exported video.
             try:
                 if getattr(self, 'blur_overlay_enabled_var', None) and self.blur_overlay_enabled_var.get():
-                    _vid_h = HEIGHT
-                    _y_off = globals().get('CAPTION_Y_OFFSET', 0)
-                    _fs = globals().get('CAPTION_FONT_SIZE', 56)
-                    _wpc = max(1, globals().get('WORDS_PER_GROUP', 2))
-                    _line_h = _fs * 1.3
-                    _spacing = _fs * 0.18
-                    _pad = _fs * 0.8
-                    _est_cap_h = _wpc * _line_h + max(0, _wpc - 1) * _spacing + _pad
                     _keep = max(0.01, 1.0 - top_pct - bottom_pct)
-                    _safety = max(float(_fs), 30.0)
-                    _cap_bot = _vid_h + _y_off
-                    _cap_top = _cap_bot - _est_cap_h
-                    _box_top = max(0.0, _cap_top - _safety)
-                    _box_bot = min(float(_vid_h), _cap_bot + _safety * 0.5)
-                    def _cf_to_orig(px):
-                        return max(0.0, min(1.0, top_pct + px / _vid_h * _keep))
-                    _by = _cf_to_orig(_box_top)
-                    _bh = _cf_to_orig(_box_bot) - _by
-                    _bh = max(0.02, _bh)
-                    bx1 = 0
-                    by1 = _by * h
-                    bx2 = float(composed.width)
-                    by2 = (_by + _bh) * h
-                    self.mini_canvas.create_rectangle(
-                        bx1, by1, bx2, by2,
-                        outline="#00CFFF", width=2, dash=(5, 3), tags="blur_box"
-                    )
-                    self.mini_canvas.create_text(
-                        (bx1 + bx2) / 2, max(8, by1 - 4),
-                        text="⇕ blur", fill="#00CFFF", font=("Arial", 8),
-                        anchor="s", tags="blur_box_label"
-                    )
+                    _bx = self.blur_overlay_x_var.get() / 100.0
+                    _by = self.blur_overlay_y_var.get() / 100.0
+                    _bw = self.blur_overlay_w_var.get() / 100.0
+                    _bh = self.blur_overlay_h_var.get() / 100.0
+                    # X: no crop in X, scale directly to canvas width
+                    bx1 = max(0.0, _bx * composed.width)
+                    bx2 = min(float(composed.width), (_bx + _bw) * composed.width)
+                    # Y: subtract top-crop fraction, then scale into cropped canvas height
+                    by1 = max(0.0, (_by - top_pct) / _keep * h)
+                    by2 = min(float(h), (_by + _bh - top_pct) / _keep * h)
+                    if bx2 > bx1 and by2 > by1:
+                        self.mini_canvas.create_rectangle(
+                            bx1, by1, bx2, by2,
+                            outline="#00CFFF", width=2, dash=(5, 3), tags="blur_box"
+                        )
+                        self.mini_canvas.create_text(
+                            (bx1 + bx2) / 2, max(8, by1 - 4),
+                            text="⇕ blur", fill="#00CFFF", font=("Arial", 8),
+                            anchor="s", tags="blur_box_label"
+                        )
             except Exception:
                 pass
 
