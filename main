@@ -9808,12 +9808,59 @@ class App:
             box_top_cf    = max(0.0,            caption_top_cf    - safety_margin_cf)
             box_bottom_cf = min(float(vid_height), caption_bottom_cf + safety_margin_cf * 0.5)
 
+            # ── Estimate pre-rendered fg geometry (same logic as export) ─────────
+            # The export formula is: cf_px = fg_y_off + fg_h * (orig_pct - crop_top) / keep_ratio
+            # To produce correct by_pct/bh_pct we need the inverse:
+            #   orig_pct = crop_top + (cf_px - fg_y_off) / fg_h * keep_ratio
+            # Approximate fg_h and fg_y_off using video dimensions + scale factors.
+            fg_h_approx   = float(vid_height)
+            fg_y_off_approx = 0.0
+            try:
+                _vid_path = self.video_var.get().strip() if hasattr(self, 'video_var') else ''
+                _orig_w, _orig_h = 0, 0
+                # Try cached preview clip first (cheapest)
+                _cached = getattr(self, '_preview_clip', None)
+                if _cached is not None:
+                    try:
+                        _orig_w, _orig_h = int(_cached.w), int(_cached.h)
+                    except Exception:
+                        _orig_w, _orig_h = 0, 0
+                # Fall back to ffprobe if clip not available
+                if (_orig_w <= 0 or _orig_h <= 0) and _vid_path and os.path.exists(_vid_path):
+                    import subprocess as _sp
+                    _r = _sp.run(
+                        ["ffprobe", "-v", "error", "-select_streams", "v:0",
+                         "-show_entries", "stream=width,height",
+                         "-of", "csv=p=0:s=x", _vid_path],
+                        capture_output=True, text=True, timeout=15
+                    )
+                    if _r.returncode == 0 and 'x' in _r.stdout.strip():
+                        _parts = _r.stdout.strip().split('x')
+                        _orig_w, _orig_h = int(_parts[0]), int(_parts[1])
+                if _orig_w > 0 and _orig_h > 0:
+                    _crop_h  = _orig_h * keep_ratio
+                    _crop_w  = float(_orig_w)
+                    _w_scale = vid_width / _crop_w if _crop_w > 0 else 1.0
+                    _base_sf = 1.03
+                    _user_zoom = globals().get('VIDEO_ZOOM_SCALE', 1.0)
+                    _min_fgh  = vid_height * globals().get('MIN_FG_HEIGHT_RATIO', 0.35)
+                    _est_h    = _crop_h * _w_scale * _base_sf
+                    if _est_h < _min_fgh and _crop_h > 0:
+                        _fg_base = max(_w_scale, _min_fgh / _crop_h)
+                    else:
+                        _fg_base = _w_scale
+                    _fg_scale  = _fg_base * _base_sf * _user_zoom
+                    fg_h_approx    = max(1.0, round(_crop_h * _fg_scale) & ~1)
+                    fg_y_off_approx = max(0.0, (vid_height - fg_h_approx) / 2.0)
+            except Exception:
+                pass  # fall back to fg_h=vid_height, fg_y_off=0 (safe but less accurate)
+
             # ── Map composited-frame pixels → original-video fraction ─────────────
-            # The composited frame shows the middle keep_ratio of the original video:
-            #   orig_frac = crop_top + (cf_px / vid_height) * keep_ratio
+            # Use the inverse of the export formula so the stored by_pct/bh_pct values
+            # round-trip correctly through the export coordinate transform.
             def cf_px_to_orig_pct(cf_px):
-                cf_frac   = cf_px / vid_height
-                orig_frac = crop_top + cf_frac * keep_ratio
+                fg_pct    = (cf_px - fg_y_off_approx) / fg_h_approx
+                orig_frac = crop_top + fg_pct * keep_ratio
                 return max(0.0, min(100.0, orig_frac * 100.0))
 
             by_pct = cf_px_to_orig_pct(box_top_cf)
