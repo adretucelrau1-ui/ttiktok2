@@ -7696,6 +7696,15 @@ class App:
         self._register_lockable("blur_intensity", _lbl_bi, self.blur_intensity_scale)
         row += 1
 
+        # Auto-detect caption position + apply-to-all helpers
+        _blur_auto_btns = ttk.Frame(left_frame)
+        _blur_auto_btns.grid(row=row, column=0, columnspan=3, sticky="w", pady=(4, 2))
+        ttk.Button(_blur_auto_btns, text="🎯 Auto Caption Blur",
+                   command=self._auto_detect_blur_for_captions).pack(side="left", padx=(0, 4))
+        ttk.Button(_blur_auto_btns, text="📋 Apply to All Jobs",
+                   command=self._apply_blur_to_all_jobs).pack(side="left", padx=4)
+        row += 1
+
         ttk.Separator(left_frame).grid(row=row, column=0, columnspan=3, sticky="we", pady=8)
         row += 1
 
@@ -9509,6 +9518,88 @@ class App:
             self._caption_pos_debounce_id = self.root.after(80, self._do_caption_position_update)
         except Exception:
             pass
+
+    def _auto_detect_blur_for_captions(self):
+        """Compute and set blur overlay position to cover the caption area automatically.
+
+        Uses the current CAPTION_Y_OFFSET and CAPTION_FONT_SIZE globals together with
+        the words-per-caption setting to estimate where captions will appear and sets the
+        Blur Overlay sliders so the blurred region covers those captions exactly.
+        The blur is applied to the *full width* of the video for reliable coverage.
+        """
+        try:
+            y_offset = globals().get('CAPTION_Y_OFFSET', 0)
+            font_size = globals().get('CAPTION_FONT_SIZE', 56)
+            vid_height = HEIGHT  # 1920 (or scaled for 4K)
+
+            # Estimate number of lines from words-per-caption setting
+            try:
+                wpc = self.words_per_caption_var.get() if hasattr(self, 'words_per_caption_var') else 2
+            except Exception:
+                wpc = 2
+            est_lines = max(1, (wpc + 1) // 2)  # 1 word → 1 line; 2 words → 1 line; 3 → 2, etc.
+
+            # Caption bottom edge ≈ HEIGHT + y_offset (y_offset <= 0 moves caption up)
+            caption_bottom_px = vid_height + y_offset
+            # Caption text height = lines * line_height + top/bottom padding
+            line_height = font_size * 1.4
+            extra_pad = font_size * 0.7  # top + bottom padding in the caption image
+            caption_height_px = est_lines * line_height + extra_pad
+            caption_top_px = caption_bottom_px - caption_height_px
+
+            # Add a small safety margin so the blur fully covers the text
+            margin_px = font_size * 0.4
+            box_top_px = caption_top_px - margin_px
+            box_bottom_px = caption_bottom_px + margin_px
+
+            # Convert to percentages of video height
+            by_pct = max(0.0, box_top_px / vid_height * 100.0)
+            bh_pct = max(2.0, (box_bottom_px - box_top_px) / vid_height * 100.0)
+            # Clamp so box stays within the frame
+            if by_pct + bh_pct > 100.0:
+                bh_pct = 100.0 - by_pct
+
+            # Full width (captions are centred but can span the whole row)
+            bx_pct = 0.0
+            bw_pct = 100.0
+
+            # Apply to UI sliders
+            self.blur_overlay_x_var.set(round(bx_pct, 1))
+            self.blur_overlay_y_var.set(round(by_pct, 1))
+            self.blur_overlay_w_var.set(round(bw_pct, 1))
+            self.blur_overlay_h_var.set(round(bh_pct, 1))
+            # Make sure blur is enabled
+            self.blur_overlay_enabled_var.set(True)
+            # Refresh preview to show new position
+            self._mini_update_worker_async()
+        except Exception as e:
+            messagebox.showerror("Auto Blur Error", str(e))
+
+    def _apply_blur_to_all_jobs(self):
+        """Copy current Blur Overlay settings to every job in the queue."""
+        try:
+            if not self.jobs:
+                messagebox.showinfo("No jobs", "Nu există joburi în coadă.")
+                return
+            enabled = self.blur_overlay_enabled_var.get() if hasattr(self, 'blur_overlay_enabled_var') else False
+            bx = self.blur_overlay_x_var.get() if hasattr(self, 'blur_overlay_x_var') else 0.0
+            by = self.blur_overlay_y_var.get() if hasattr(self, 'blur_overlay_y_var') else 10.0
+            bw = self.blur_overlay_w_var.get() if hasattr(self, 'blur_overlay_w_var') else 100.0
+            bh = self.blur_overlay_h_var.get() if hasattr(self, 'blur_overlay_h_var') else 15.0
+            bi = self.blur_overlay_intensity_var.get() if hasattr(self, 'blur_overlay_intensity_var') else 20
+            for i in range(len(self.jobs)):
+                job = dict(self.jobs[i])
+                job["blur_overlay_enabled"] = enabled
+                job["blur_overlay_x"] = bx
+                job["blur_overlay_y"] = by
+                job["blur_overlay_w"] = bw
+                job["blur_overlay_h"] = bh
+                job["blur_overlay_intensity"] = bi
+                self.jobs[i] = job
+            self._refresh_job_listbox()
+            messagebox.showinfo("Done", f"Blur overlay aplicat la {len(self.jobs)} joburi.")
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
 
     def on_caption_font_size_changed(self, val):
         """Callback when caption font size slider changes (debounced)."""
