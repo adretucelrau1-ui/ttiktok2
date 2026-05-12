@@ -9683,17 +9683,17 @@ class App:
     def _auto_detect_blur_for_captions(self):
         """Compute and set blur overlay position to cover the caption area automatically.
 
-        Performs a thorough analysis by actually measuring the worst-case caption height
-        using the real font (via PIL).  This is equivalent to "analysing the whole video"
-        because it simulates the tallest caption that can ever be produced:
+        Performs a worst-case analysis by measuring the tallest possible caption
+        height using the real font (via PIL) — it builds a synthetic test string of
+        *wpc* long words (each long enough to force its own line-break) and runs the
+        identical word-wrap logic used by generate_caption_image.  This gives a
+        conservative upper-bound without needing actual caption texts.
 
-          • Build a worst-case test string of *wpc* long words (each long enough to
-            force a line-break) and run the identical word-wrap logic used by
-            generate_caption_image / _generate_ass_subtitle_file.
-          • Measure the resulting total height in composited-frame pixels.
-          • Convert that height to original-video-% space using the current crop ratios.
-          • Add extra safety margins so the blur box fully covers any font rendering
-            overrun, shadow, and padding.
+        Note: at *export time* the blur box is further auto-refined by
+        _compute_caption_blur_box_from_segments, which iterates through every real
+        caption segment and uses the actual maximum measured height, so the final
+        exported video will always have perfect coverage regardless of what this
+        button sets.
 
         Blur overlay X/Y/W/H are in *original-video-% space*:
           0 % = top/left of the uncropped source video frame.
