@@ -9546,22 +9546,21 @@ class App:
                                         fill="#fff", font=("Arial",9), tags="label_bottom")
             
             # Draw blur box outline on mini_canvas (before caption so captions stay on top).
-            # Slider values are in original-video-% space; map them to canvas coordinates
-            # by subtracting the top-crop offset and scaling by keep_ratio so the box
-            # appears in exactly the same position as it will in the exported video.
+            # The canvas shows the FULL (uncropped) image — overlay_crop_on_image only
+            # darkens the crop bands, it does not remove rows. So slider values (% of
+            # original video) map directly to canvas pixels: x% * canvas_w, y% * canvas_h.
+            # apply_blur_overlay_to_preview uses the same direct mapping, so the box
+            # and the actual preview blur will always be in the same position.
             try:
                 if getattr(self, 'blur_overlay_enabled_var', None) and self.blur_overlay_enabled_var.get():
-                    _keep = max(0.01, 1.0 - top_pct - bottom_pct)
                     _bx = self.blur_overlay_x_var.get() / 100.0
                     _by = self.blur_overlay_y_var.get() / 100.0
                     _bw = self.blur_overlay_w_var.get() / 100.0
                     _bh = self.blur_overlay_h_var.get() / 100.0
-                    # X: no crop in X, scale directly to canvas width
                     bx1 = max(0.0, _bx * composed.width)
                     bx2 = min(float(composed.width), (_bx + _bw) * composed.width)
-                    # Y: subtract top-crop fraction, then scale into cropped canvas height
-                    by1 = max(0.0, (_by - top_pct) / _keep * h)
-                    by2 = min(float(h), (_by + _bh - top_pct) / _keep * h)
+                    by1 = max(0.0, _by * h)
+                    by2 = min(float(h), (_by + _bh) * h)
                     if bx2 > bx1 and by2 > by1:
                         self.mini_canvas.create_rectangle(
                             bx1, by1, bx2, by2,
