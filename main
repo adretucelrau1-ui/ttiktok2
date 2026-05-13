@@ -4654,6 +4654,8 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
             _b_crop_top  = float(crop_top_ratio  or 0.0)
             _b_crop_bot  = float(crop_bottom_ratio or 0.0)
             _b_keep      = max(0.01, 1.0 - _b_crop_top - _b_crop_bot)
+            # 0.99 threshold: only transform when crop is meaningfully active
+            # (keep_ratio == 1.0 means no crop; allow a tiny float tolerance).
             if _b_keep < 0.99:
                 by_out  = max(0.0, (by_pct / 100.0 - _b_crop_top) / _b_keep * 100.0)
                 bh_out  = min(100.0 - by_out, bh_pct / 100.0 / _b_keep * 100.0)
