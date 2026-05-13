@@ -4636,8 +4636,11 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
 
         # Step 2: blur overlay BEFORE captions so captions remain visible on top.
         # The user sets blur coordinates in the preview which shows the ORIGINAL video
-        # frame. Blur overlay coordinates are canvas-% (0–100 = 0px–canvas_h/w on the
-        # output canvas), matching exactly what the mini preview draws.
+        # frame.  by_pct/bh_pct are stored in original-video-% space (0–100 = top–bottom
+        # of the uncropped source frame), exactly matching where the mini preview draws
+        # the blur box.  When crop is active the foreground video is cropped and scaled,
+        # so visible content shifts in the output canvas.  Transform the blur box from
+        # original-frame-% to output-canvas-% so the blur tracks the video content.
         blur_ov = effect_settings or {}
         if blur_ov.get('blur_overlay_enabled', False):
             bx_pct = float(blur_ov.get('blur_overlay_x', 10))
@@ -4646,11 +4649,27 @@ def _export_with_ffmpeg_filters(bg_path, fg_path, caption_segments, audio_path, 
             bh_pct = float(blur_ov.get('blur_overlay_h', 15))
             b_intensity = int(blur_ov.get('blur_overlay_intensity', 20))
 
-            # Canvas-% → canvas pixels (1:1 mapping so preview == export).
-            bx_px = max(0, int(video_width  * bx_pct / 100.0)) & ~1
-            by_px = max(0, int(video_height * by_pct / 100.0)) & ~1
-            bw_px = max(2, int(video_width  * bw_pct / 100.0)) & ~1
-            bh_px = max(2, int(video_height * bh_pct / 100.0)) & ~1
+            # Apply crop transform: original-frame-% → output-canvas-%.
+            # Formula: out_pct = (orig_pct/100 − crop_top) / keep × 100
+            _b_crop_top  = float(crop_top_ratio  or 0.0)
+            _b_crop_bot  = float(crop_bottom_ratio or 0.0)
+            _b_keep      = max(0.01, 1.0 - _b_crop_top - _b_crop_bot)
+            if _b_keep < 0.99:
+                by_out  = max(0.0, (by_pct / 100.0 - _b_crop_top) / _b_keep * 100.0)
+                bh_out  = min(100.0 - by_out, bh_pct / 100.0 / _b_keep * 100.0)
+                bx_out  = bx_pct   # no horizontal crop
+                bw_out  = bw_pct
+                log_fn(f"[EXPORT] Blur crop-transform: orig y={by_pct:.1f}% h={bh_pct:.1f}% "
+                       f"→ out y={by_out:.1f}% h={bh_out:.1f}% "
+                       f"(crop_top={_b_crop_top*100:.1f}% keep={_b_keep*100:.1f}%)")
+            else:
+                by_out, bh_out, bx_out, bw_out = by_pct, bh_pct, bx_pct, bw_pct
+
+            # Output-canvas-% → pixels.
+            bx_px = max(0, int(video_width  * bx_out / 100.0)) & ~1
+            by_px = max(0, int(video_height * by_out / 100.0)) & ~1
+            bw_px = max(2, int(video_width  * bw_out / 100.0)) & ~1
+            bh_px = max(2, int(video_height * bh_out / 100.0)) & ~1
 
             # Clamp to fit within frame
             if bx_px + bw_px > video_width:
@@ -9812,14 +9831,18 @@ class App:
             box_top_cf    = max(0.0,            caption_top_cf    - safety_margin_cf)
             box_bottom_cf = min(float(vid_height), caption_bottom_cf + safety_margin_cf * 0.5)
 
-            # ── Map composited-frame pixels → canvas-% (direct, no crop transform) ─
-            # by_pct/bh_pct are stored in canvas-% space (0–100 = top/bottom of the
-            # output canvas).  The export formula and the mini preview both apply them
-            # as a plain fraction of the canvas height, so preview == export with no
-            # coordinate transformation required.
-            by_pct = max(0.0, min(100.0, box_top_cf / vid_height * 100.0))
-            bh_pct = max(0.0, min(100.0, box_bottom_cf / vid_height * 100.0)) - by_pct
-            bh_pct = max(2.0, bh_pct)
+            # ── Map composited-frame pixels → original-video-% space ─────────────
+            # by_pct/bh_pct are stored in original-video-% space (0–100 = top–bottom
+            # of the uncropped source frame) so that the export crop transform
+            #   out_pct = (orig_pct/100 − crop_top) / keep_ratio × 100
+            # correctly places the blur at the caption area in the output canvas even
+            # when a custom crop is active.
+            # Formula: orig_frac = crop_top + output_canvas_frac × keep_ratio
+            by_out_frac   = max(0.0, min(1.0, box_top_cf    / vid_height))
+            bbot_out_frac = max(0.0, min(1.0, box_bottom_cf / vid_height))
+            by_pct   = max(0.0, min(100.0, (crop_top + by_out_frac   * keep_ratio) * 100.0))
+            bbot_pct = max(0.0, min(100.0, (crop_top + bbot_out_frac * keep_ratio) * 100.0))
+            bh_pct   = max(2.0, bbot_pct - by_pct)
             # Clamp so box stays within 0–100 %
             if by_pct + bh_pct > 100.0:
                 bh_pct = 100.0 - by_pct
